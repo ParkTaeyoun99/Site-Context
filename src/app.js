@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import ClipperLib from 'clipper-lib';
+import { zipSync, strToU8 } from 'fflate';
+const STUDIO = !!window.__STUDIO;
 
 // ---------- 상태 ----------
 const S = {
@@ -265,6 +267,13 @@ function elevAbsLL(lon, lat) {
 // 로컬 좌표(m) → 대지 최저점 기준 상대 높이
 function elev(x, y) {
   if (!T.ready) return 0;
+  if (T.grid) {
+    const G = T.grid, fx = (x - G.x0) / G.step, fy = (y - G.y0) / G.step;
+    const i = Math.max(0, Math.min(G.nx - 2, Math.floor(fx))), j = Math.max(0, Math.min(G.ny - 2, Math.floor(fy)));
+    const tx = Math.max(0, Math.min(1, fx - i)), ty = Math.max(0, Math.min(1, fy - j));
+    const v = (a, b) => G.data[b * G.nx + a];
+    return (v(i, j) * (1 - tx) + v(i + 1, j) * tx) * (1 - ty) + (v(i, j + 1) * (1 - tx) + v(i + 1, j + 1) * tx) * ty;
+  }
   const v = elevAbsLL(...unproject(x, y));
   return v === null ? 0 : v - T.base;
 }
@@ -747,6 +756,7 @@ const ZONES = {
   '생산녹지지역': [20, 50, false], '자연녹지지역': [20, 50, false],
 };
 async function vwPoint(layer, x, y) {
+  if (STUDIO) return [];
   const [lon, lat] = unproject(x, y);
   const q = new URLSearchParams({ service: 'data', request: 'GetFeature', version: '2.0', data: layer, key: vwKey(), domain: vwDomain(),
     geomFilter: `POINT(${lon} ${lat})`, crs: 'EPSG:4326', format: 'json', errorFormat: 'json', size: '10', geometry: 'false', attribute: 'true' });
@@ -1078,6 +1088,36 @@ function pathsToShapes(paths) {
   });
 }
 
+// 대지 x 0.5m 간격마다: 가장 북쪽 외곽 경계 → (도로·철도면 건너편까지) 정북 기준 대지경계
+function refColumns(edges, sunRoad) {
+  const xs = S.siteParcels.flatMap((p) => p.ring.map((q) => q[0]));
+  const xmin = Math.min(...xs), xmax = Math.max(...xs);
+  const cols = [];
+  for (let x = xmin + 0.01; x <= xmax; x += 0.5) {
+    let top = null;
+    edges.forEach((e) => {
+      const [x0, y0] = e.a, [x1, y1] = e.b;
+      if ((x0 - x) * (x1 - x) > 0 || x0 === x1) return;
+      const y = y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
+      if (!top || y > top.y) top = { y, e };
+    });
+    if (!top) continue;
+    let ref = null;
+    if (!top.e.road) ref = { y: top.y, parcel: S.parcels.find((q) => pip([x, top.y + 0.5], q.ring)) || null };
+    else if (sunRoad) ref = marchNorth(x, top.y + 0.05);
+    cols.push({ x, ref });
+  }
+  return cols;
+}
+// 필지 용도지역 조회 (수집기에서만 네트워크 사용, 결과는 프로젝트 파일에 저장)
+async function ensureZones(list) {
+  if (S.demo || STUDIO) return;
+  for (const rp of [...new Set(list.filter(Boolean))]) {
+    if (rp.zoneName !== undefined) continue;
+    try { const ip = interiorPoint(rp.ring); const z = await vwPoint('LT_C_UQ111', ip[0], ip[1]); rp.zoneName = z.length ? z[0].uname : null; } catch (e) { rp.zoneName = null; }
+  }
+}
+
 async function scaleStudy() {
   if (!S.siteParcels.length) return;
   const bcr = parseFloat($('zBcr').value) || 0, far = parseFloat($('zFar').value) || 0;
@@ -1101,26 +1141,8 @@ async function scaleStudy() {
   // 3) 정북 기준선: x 0.5m 간격으로, 대지 가장 북쪽 경계 → (도로면 건너편까지) 인접 대지경계
   const xs = S.siteParcels.flatMap((p) => p.ring.map((q) => q[0]));
   const xmin = Math.min(...xs), xmax = Math.max(...xs);
-  const cols = [];
-  for (let x = xmin + 0.01; x <= xmax; x += 0.5) {
-    let top = null;
-    edges.forEach((e) => {
-      const [x0, y0] = e.a, [x1, y1] = e.b;
-      if ((x0 - x) * (x1 - x) > 0 || x0 === x1) return;
-      const y = y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
-      if (!top || y > top.y) top = { y, e };
-    });
-    if (!top) continue;
-    let ref = null;
-    if (!top.e.road) ref = { y: top.y, parcel: S.parcels.find((q) => pip([x, top.y + 0.5], q.ring)) || null };
-    else if (sunRoad) ref = marchNorth(x, top.y + 0.05);
-    cols.push({ x, ref });
-  }
-  const refParcels = [...new Set(cols.map((c) => c.ref && c.ref.parcel).filter(Boolean))];
-  if (!S.demo) for (const rp of refParcels) {
-    if (rp.zoneName !== undefined) continue;
-    try { const ip = interiorPoint(rp.ring); const z = await vwPoint('LT_C_UQ111', ip[0], ip[1]); rp.zoneName = z.length ? z[0].uname : null; } catch (e) { rp.zoneName = null; }
-  }
+  const cols = refColumns(edges, sunRoad);
+  await ensureZones(cols.map((c) => c.ref && c.ref.parcel));
   const resid = (z) => !z || /전용주거|일반주거/.test(z);
   cols.forEach((c) => { c.refY = sun && c.ref && resid(c.ref.parcel && c.ref.parcel.zoneName) ? c.ref.y : Infinity; });
   const req = (h) => (h <= 10 ? sunD : sunNew ? (h <= 17 ? sunD2 : h / 2) : h / 2);
@@ -1249,32 +1271,71 @@ function dxf() {
   out.push('0', 'ENDSEC', '0', 'EOF');
   return out.join('\r\n');
 }
-function download(name, text, type) {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([text], { type }));
-  a.download = name; a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+async function saveFile(name, data) {
+  if (!STUDIO) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(data instanceof Blob ? data : new Blob([data]));
+    a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    return;
+  }
+  const dl = window.claude && (await window.claude.use('downloads'));
+  if (!dl) { log('이 화면에서는 파일 저장을 쓸 수 없어요.', 'err'); return; }
+  let fname = name, payload = data;
+  if (/\.dxf$/i.test(name)) { // 아티팩트는 .dxf 저장을 허용하지 않아 zip으로 감싼다
+    payload = new Blob([zipSync({ [name]: strToU8(data) })]);
+    fname = name.replace(/\.dxf$/i, '.zip');
+  }
+  try { await dl.save({ filename: fname, data: payload }); log(`${fname} 저장`, 'ok'); }
+  catch (e) { if (e.code !== 'declined') log('저장 실패: ' + (e.message || e.code), 'err'); }
 }
-function projectJson() {
+const r2 = (v) => Math.round(v * 100) / 100;
+const ringOut = (r) => r.map(([x, y]) => [r2(x), r2(y)]);
+async function exportProject() {
+  // 정북 기준이 될 수 있는 대지의 용도지역을 미리 조회해 파일에 담는다
+  const edges = siteExteriorEdges();
+  const refs = [...refColumns(edges, true), ...refColumns(edges, false)].map((c) => c.ref && c.ref.parcel);
+  log('정북 인접 대지 용도지역 조회 중…');
+  await ensureZones(refs);
+  let grid = null;
+  if (T.ready && !T.grid) {
+    const R = S.radius + 10, step = 2, n = Math.round((2 * R) / step) + 1, data = [];
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) data.push(r2(elev(-R + i * step, -R + j * step)));
+    grid = { x0: -R, y0: -R, step, nx: n, ny: n, data };
+  } else if (T.grid) grid = { ...T.grid, data: Array.from(T.grid.data) };
+  const keep = ['buld_nm', 'gro_flo_co', 'rd_nm', 'buld_no'];
   return JSON.stringify({
-    version: 1, origin: S.origin, floorHeight: S.floorH, radius: S.radius, demo: S.demo,
-    site: S.siteParcels.map(({ id, jibun, ring, ground, props }) => ({ id, jibun, ring, ground, pnu: props.pnu })),
-    parcels: S.parcels.map(({ id, ring, ground, props }) => ({ id, ring, ground, pnu: props.pnu })),
-    buildings: S.buildings.map(({ id, ring, floors, height, heightSrc, ground, onSite, props }) => ({ id, ring, floors, height, heightSrc, ground, onSite, props })),
+    version: 2, created: new Date().toISOString(), address: $('base').value + ' ' + $('jibuns').value,
+    origin: S.origin, floorHeight: S.floorH, radius: S.radius, demo: S.demo,
+    zone: S.zone || null, zoneInfo: $('zoneInfo').innerText,
+    terrain: grid ? { base: T.base, grid } : null,
+    site: S.siteParcels.map((p) => ({ id: p.id, jibun: p.jibun, ring: ringOut(p.ring), ground: r2(p.ground), pnu: p.props.pnu })),
+    parcels: S.parcels.map((p) => ({ id: p.id, ring: ringOut(p.ring), ground: r2(p.ground), pnu: p.props.pnu, jibun: p.props.jibun, zoneName: p.zoneName })),
+    buildings: S.buildings.map((b) => ({ id: b.id, ring: ringOut(b.ring), floors: b.floors, height: r2(b.height), heightSrc: b.heightSrc, ground: r2(b.ground), onSite: !!b.onSite,
+      props: Object.fromEntries(keep.filter((k) => b.props && b.props[k] != null).map((k) => [k, b.props[k]])) })),
   });
 }
 function loadProject(text) {
   const d = JSON.parse(text);
-  Object.assign(S, { origin: d.origin, floorH: d.floorHeight, radius: d.radius, demo: d.demo });
-  S.siteParcels = d.site.map((p) => ({ ...p, props: { pnu: p.pnu } }));
-  S.parcels = d.parcels.map((p) => ({ ...p, props: { pnu: p.pnu } }));
+  Object.assign(S, { origin: d.origin, floorH: d.floorHeight || 3.3, radius: d.radius, demo: !!d.demo, env: null, mass: null, sectionPts: [] });
+  S.siteParcels = d.site.map((p) => ({ ...p, props: { pnu: p.pnu, jibun: p.jibun } }));
+  S.parcels = d.parcels.map((p) => { const q = { ...p, props: { pnu: p.pnu, jibun: p.jibun } }; if (p.zoneName === undefined) delete q.zoneName; return q; });
   S.buildings = d.buildings;
-  log('프로젝트 파일을 불러왔습니다.', 'ok');
+  T.tiles = {}; T.grid = null; T.ready = false;
+  if (d.terrain && d.terrain.grid) { T.grid = { ...d.terrain.grid, data: Float32Array.from(d.terrain.grid.data) }; T.base = d.terrain.base; T.ready = true; }
+  S.zone = d.zone || null;
+  if (S.zone && ZONES[S.zone]) { $('zSel').value = S.zone; applyZoneDefaults(); }
+  $('zoneInfo').innerHTML = d.zoneInfo ? d.zoneInfo.replace(/\n/g, '<br>') : '용도지역 정보 없음 — 직접 고르세요.';
+  $('floorH').value = S.floorH;
+  S.project = { address: d.address || '', created: d.created || '' };
+  log(`프로젝트 불러옴: ${d.address || ''}${T.ready ? '' : ' (지형 없음)'}`, 'ok');
   buildScene(true);
+  if (window.__onProjectLoaded) window.__onProjectLoaded(d, text);
 }
 
 // ---------- UI 연결 ----------
 function init() {
+  if (STUDIO) document.body.classList.add('studio');
   $('key').value = store.get('vw_key') || '';
   $('domain').value = store.get('vw_domain') || (location.origin + location.pathname.replace(/[^/]*$/, ''));
   initThree();
@@ -1292,7 +1353,6 @@ function init() {
   };
   $('massShow').onchange = () => drawMass();
   $('envShow').onchange = async () => { if ($('envShow').checked) await buildEnvelope(); else drawEnvelope(); };
-  $('envShow').onchange = () => drawEnvelope();
   $('secClose').onclick = () => { $('sectionBox').style.display = 'none'; };
   $('floorH').onchange = (e) => {
     S.floorH = parseFloat(e.target.value) || 3.3;
@@ -1301,12 +1361,18 @@ function init() {
   };
   document.querySelectorAll('[data-mode]').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
   $('showLines').onchange = () => S.origin && S.mode === 'view' && runViewAnalysis();
-  $('btnDxf').onclick = () => S.origin && download('site-context.dxf', dxf(), 'application/dxf');
-  $('btnJson').onclick = () => S.origin && download('site-context.json', projectJson(), 'application/json');
-  $('btnPng').onclick = () => { const a = document.createElement('a'); a.href = renderer.domElement.toDataURL('image/png'); a.download = 'site-context.png'; a.click(); };
-  $('fileJson').onchange = (e) => { const f = e.target.files[0]; if (f) f.text().then(loadProject); };
+  $('btnDxf').onclick = () => S.origin && saveFile('site-context.dxf', dxf());
+  $('btnJson').onclick = async () => { if (!S.origin) return; const t = await exportProject(); saveFile('site-project.json', t); log('프로젝트 파일 내보냄 — 스튜디오에 끌어다 놓으세요.', 'ok'); };
+  $('btnPng').onclick = () => renderer.domElement.toBlob((b) => b && saveFile('site-context.png', b));
+  ['fileJson', 'fileJson2'].forEach((id) => { $(id).onchange = (e) => { const f = e.target.files[0]; if (f) f.text().then(loadProject).catch((er) => log('불러오기 실패: ' + er.message, 'err')); }; });
   setMode('height');
+  // 파일 끌어다 놓기
+  const host = document.body;
+  host.addEventListener('dragover', (e) => { e.preventDefault(); host.classList.add('drag'); });
+  host.addEventListener('dragleave', () => host.classList.remove('drag'));
+  host.addEventListener('drop', (e) => { e.preventDefault(); host.classList.remove('drag'); const f = e.dataTransfer.files[0]; if (f) f.text().then(loadProject).catch((er) => log('불러오기 실패: ' + er.message, 'err')); });
   window.__S = S; // 디버그용
+  window.__app = { loadProject, scaleStudy, buildScene, saveFile, dxf, elev, analyzeRoads, siteExteriorEdges, ZONES, log, THREE, groupCtx: () => groupCtx, textSprite, pip, polyArea, centroid, densify, offs: null };
   window.__demo = loadDemo;
   window.__mode = setMode;
 }

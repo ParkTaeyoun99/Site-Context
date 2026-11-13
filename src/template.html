@@ -34,6 +34,11 @@
   .tbl.sum td:first-child { color: #666; }
   .tbl tr.part td { color: #b9770e; }
   details summary { cursor: pointer; color: #666; }
+  .studio-only { display: none; }
+  body.studio .studio-only { display: block; }
+  body.studio .collector-only { display: none; }
+  #drop { border: 2px dashed #bbb; border-radius: 8px; padding: 16px; text-align: center; color: #666; margin-top: 6px; }
+  body.drag #drop { border-color: #d94f3d; background: #fff4f2; }
   @media (max-width: 760px) { #app { flex-direction: column; } #panel { width: 100%; height: 50%; border-right: 0; border-bottom: 1px solid #ddd; } }
 </style>
 </head>
@@ -44,6 +49,7 @@
     <div class="sub">대지 → 주변 3D 맥락 · 높이 관계 · 시선 분석 (1단계)</div>
 
     <h2>1. 데이터</h2>
+    <div class="collector-only">
     <label>V-World 인증키</label>
     <input id="key" type="password" placeholder="vworld.kr 에서 발급">
     <label>등록 도메인 <span class="sub">(키 발급 시 적은 주소와 같아야 함)</span></label>
@@ -56,6 +62,12 @@
     <button id="btnLoad" class="primary">대지 불러오기</button>
     <button id="btnDemo">데모 보기</button>
     <button id="btnTerrain">지형 다시 받기</button>
+    <p class="sub">다 불러온 뒤 <b>6. 내보내기 → 프로젝트 파일</b>을 눌러 스튜디오로 가져가세요.</p>
+    </div>
+    <div class="studio-only">
+      <div id="drop">여기에 <b>프로젝트 파일(.json)</b>을 끌어다 놓거나<br><input id="fileJson2" type="file" accept=".json"></div>
+      <p class="sub">프로젝트 파일은 대지 데이터 수집기(GitHub 사이트)에서 만들어요.</p>
+    </div>
     <label><input id="showContours" type="checkbox" checked> 등고선 (1m · 5m 굵게)</label>
     <div id="log"></div>
 
@@ -105,7 +117,7 @@
 
     <h2>6. 내보내기</h2>
     <button id="btnDxf">CAD (DXF)</button>
-    <button id="btnJson">프로젝트 (JSON)</button>
+    <button id="btnJson">프로젝트 파일 (스튜디오용)</button>
     <button id="btnPng">이미지 (PNG)</button>
     <label class="sub">프로젝트 불러오기 <input id="fileJson" type="file" accept=".json"></label>
     <p class="sub">DXF: 단위 m, 원점 = 대지 중심. 레이어 SITE / PARCEL / BLDG(두께=높이) / BLDG_ROOF / ENVELOPE(사선 외피) / MASS(층별 바닥판, 두께=층고) / BUILDABLE(이격 반영 건축가능선).<br>데이터: 국토교통부 V-World (연속지적도, 도로명주소 건물). 지형: AWS Terrain Tiles 공개 DEM (z15, 참고용 — 실측 아님, 건물 높이가 일부 섞일 수 있음).</p>
