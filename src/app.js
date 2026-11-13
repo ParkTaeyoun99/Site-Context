@@ -854,13 +854,14 @@ function buildEnvelope() {
   const X0 = Math.floor(Math.min(...xs)), Y0 = Math.floor(Math.min(...ys));
   const nx = Math.ceil((Math.max(...xs) - X0) / cs), ny = Math.ceil((Math.max(...ys) - Y0) / cs);
   const cells = [];
-  let sunLimited = 0;
+  let sunLimited = 0, evaluated = 0;
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
     const p = [X0 + (i + 0.5) * cs, Y0 + (j + 0.5) * cs];
     if (!S.siteParcels.some((q) => pip(p, q.ring))) continue;
     let ok = true;
     for (const e of edges) { const d = segDist(p, e.a, e.b); if (d < (e.road ? sbRoad : sbNb)) { ok = false; break; } }
     if (!ok) continue;
+    evaluated++;
     let H = hMax;
     if (sun) {
       const hit = northHit(p, edges);
@@ -888,7 +889,7 @@ function buildEnvelope() {
     <b>최대 연면적</b> ${farGFA.toFixed(0)}㎡ (용적률 ${far}%)<br>
     <b>볼륨이 담는 연면적</b> ${envGFA.toFixed(0)}㎡ · 최고 ${maxF}층<br>
     <b>→ ${govern}</b><br>
-    건폐율을 꽉 채우면 평균 ${(farGFA / bcrA).toFixed(1)}개 층 · 정북일조로 낮아진 칸 ${((sunLimited / Math.max(1, cells.length)) * 100).toFixed(0)}%<br>
+    건폐율을 꽉 채우면 평균 ${(farGFA / bcrA).toFixed(1)}개 층 · 정북일조로 낮아진 칸 ${((sunLimited / Math.max(1, evaluated)) * 100).toFixed(0)}%<br>
     ${hIn > 0 ? '' : '<span class="warn">최고높이 미입력 → 표시 상한 100m</span><br>'}<span class="dim">0.5m 격자 근사 · 층고 ${fh}m · 지표면은 경계 평균으로 단순화 (고저차 3m 초과 시 구간별 산정은 미반영)</span>`;
 }
 function drawEnvelope() {
