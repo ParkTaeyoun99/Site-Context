@@ -196,9 +196,10 @@ async function loadVWorld() {
   // 대지 안의 기존 건물 표시
   S.buildings.forEach((b) => { b.onSite = S.siteParcels.some((sp) => pip(centroid(b.ring), sp.ring)); });
   log(`필지 ${S.parcels.length} · 건물 ${S.buildings.length} 불러옴` + (noFloor ? ` (층수 없는 건물 ${noFloor}개는 2층으로 가정)` : ''), 'ok');
-  T.ready = false;
+  T.ready = false; S.env = null;
   buildScene(true);
   await sampleTerrain();
+  await loadZoning();
 }
 
 function loadDemo() {
@@ -221,7 +222,7 @@ function loadDemo() {
     const floors = 1 + Math.floor(rnd() * (gx > 40 ? 18 : 6));
     S.buildings.push({ id: 'b' + id++, ring: [[gx + 3, gy + 3], [gx + 23, gy + 3], [gx + 23, gy + 19], [gx + 3, gy + 19]], floors, height: floors * S.floorH, heightSrc: 'floors', ground, props: { 비고: '데모 가상 건물' } });
   }
-  T.ready = false;
+  T.ready = false; S.env = null;
   log('데모 데이터(가상)를 불러왔습니다. 실제 대지는 V-World 키로 불러오세요.', 'warn');
   buildScene(true);
 }
@@ -463,6 +464,7 @@ function buildScene(resetCam) {
   const n = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(S.radius * 0.85, (T.ready ? elev(S.radius * 0.85, S.radius * 0.6) : 0) + 3, -S.radius * 0.6), 30, 0x222222, 8, 5);
   groupCtx.add(n);
   drawRoads();
+  S.envGroup = null; drawEnvelope();
   if (S.mode === 'view') runViewAnalysis();
   updateStats();
   if (resetCam) { camera.position.set(S.radius * 1.1, S.radius * 1.3, S.radius * 1.3); controls.target.set(0, 0, 0); }
@@ -732,10 +734,211 @@ function drawSection() {
   $('sectionBox').style.display = 'block';
 }
 
+// ================= 2단계: 법규 볼륨 =================
+// 서울특별시 도시계획 조례 기준 (지구단위계획·특례가 있으면 그 값이 우선 — 반드시 확인)
+const ZONES = {
+  '제1종전용주거지역': [50, 100, true], '제2종전용주거지역': [40, 120, true],
+  '제1종일반주거지역': [60, 150, true], '제2종일반주거지역': [60, 200, true], '제3종일반주거지역': [50, 250, true],
+  '준주거지역': [60, 400, false], '중심상업지역': [60, 1000, false], '일반상업지역': [60, 800, false],
+  '근린상업지역': [60, 600, false], '유통상업지역': [60, 600, false], '전용공업지역': [60, 200, false],
+  '일반공업지역': [60, 200, false], '준공업지역': [60, 400, false], '보전녹지지역': [20, 50, false],
+  '생산녹지지역': [20, 50, false], '자연녹지지역': [20, 50, false],
+};
+async function vwPoint(layer, x, y) {
+  const [lon, lat] = unproject(x, y);
+  const q = new URLSearchParams({ service: 'data', request: 'GetFeature', version: '2.0', data: layer, key: vwKey(), domain: vwDomain(),
+    geomFilter: `POINT(${lon} ${lat})`, crs: 'EPSG:4326', format: 'json', errorFormat: 'json', size: '10', geometry: 'false', attribute: 'true' });
+  const d = await jsonp('https://api.vworld.kr/req/data?' + q);
+  const r = d && d.response;
+  if (!r || r.status !== 'OK') return [];
+  return r.result.featureCollection.features.map((f) => f.properties);
+}
+async function loadZoning() {
+  if (S.demo || !S.siteParcels.length) { $('zoneInfo').innerHTML = '실제 대지를 불러오면 자동 조회해요.'; return; }
+  $('zoneInfo').textContent = '용도지역 조회 중…';
+  const zones = {}, others = new Set();
+  for (const p of S.siteParcels) {
+    const c = interiorPoint(p.ring);
+    try {
+      (await vwPoint('LT_C_UQ111', c[0], c[1])).forEach((a) => (zones[a.uname] = (zones[a.uname] || 0) + Math.abs(polyArea(p.ring))));
+    } catch (e) { /* 무시 */ }
+  }
+  const c0 = interiorPoint(S.siteParcels[0].ring);
+  for (const L of ['LT_C_UQ121', 'LT_C_UQ123', 'LT_C_UQ124', 'LT_C_UQ125', 'LT_C_UQ126', 'LT_C_UQ128', 'LT_C_UQ129', 'LT_C_UQ130', 'LT_C_UPISUQ161']) {
+    try { (await vwPoint(L, c0[0], c0[1])).forEach((a) => others.add(a.uname || a.dgm_nm || L)); } catch (e) { /* 무시 */ }
+  }
+  const list = Object.entries(zones).sort((a, b) => b[1] - a[1]);
+  S.zone = list.length ? list[0][0] : null;
+  if (S.zone && ZONES[S.zone]) {
+    $('zSel').value = S.zone;
+    applyZoneDefaults();
+  }
+  $('zoneInfo').innerHTML = (list.length ? list.map(([n, a]) => `<b>${n}</b> ${a.toFixed(0)}㎡`).join(' · ') : '용도지역을 찾지 못했어요. 직접 고르세요.') +
+    (others.size ? `<br>기타 지역·지구: ${[...others].join(', ')}` : '<br>지구단위계획·용도지구: 조회된 것 없음') +
+    `<br><span class="dim">서울시 조례 기본값이에요. 지구단위계획, 건축선, 높이 지정은 토지이음(eum.go.kr)에서 꼭 확인하세요.</span>`;
+}
+function interiorPoint(ring) {
+  const c = centroid(ring);
+  if (pip(c, ring)) return c;
+  const xs = ring.map((p) => p[0]), ys = ring.map((p) => p[1]);
+  for (let k = 0; k < 400; k++) {
+    const pt = [Math.min(...xs) + Math.random() * (Math.max(...xs) - Math.min(...xs)), Math.min(...ys) + Math.random() * (Math.max(...ys) - Math.min(...ys))];
+    if (pip(pt, ring)) return pt;
+  }
+  return c;
+}
+function applyZoneDefaults() {
+  const z = ZONES[$('zSel').value];
+  if (!z) return;
+  $('zBcr').value = z[0]; $('zFar').value = z[1]; $('zSun').checked = z[2];
+}
+
+// 대지 외곽 경계선 (대지 필지끼리 맞닿은 선 제외) + 바깥이 도로인지
+function siteExteriorEdges() {
+  const edges = [];
+  S.siteParcels.forEach((sp) => {
+    const r = polyArea(sp.ring) > 0 ? sp.ring.slice().reverse() : sp.ring; // CCW
+    r.forEach((a, i) => {
+      const b = r[(i + 1) % r.length];
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (L < 0.2) return;
+      const nx = (b[1] - a[1]) / L, ny = -(b[0] - a[0]) / L;
+      // 짧게 나눠서 각 조각마다 바깥 판정
+      const n = Math.max(1, Math.round(L / 2));
+      for (let k = 0; k < n; k++) {
+        const p0 = [a[0] + ((b[0] - a[0]) * k) / n, a[1] + ((b[1] - a[1]) * k) / n];
+        const p1 = [a[0] + ((b[0] - a[0]) * (k + 1)) / n, a[1] + ((b[1] - a[1]) * (k + 1)) / n];
+        const m = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2];
+        if (S.siteParcels.some((q) => pip([m[0] + nx * 0.6, m[1] + ny * 0.6], q.ring))) continue;
+        const hit = S.parcels.find((q) => pip([m[0] + nx * 4, m[1] + ny * 4], q.ring));
+        edges.push({ a: p0, b: p1, nx, ny, road: !!linearKind(hit) });
+      }
+    });
+  });
+  return edges;
+}
+function segDist(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy || 1)));
+  return Math.hypot(p[0] - a[0] - dx * t, p[1] - a[1] - dy * t);
+}
+// 셀 중심에서 정북(+y)으로 쏜 선이 처음 만나는 외곽 경계
+function northHit(p, edges) {
+  let best = null;
+  edges.forEach((e) => {
+    const [x0, y0] = e.a, [x1, y1] = e.b;
+    if ((x0 - p[0]) * (x1 - p[0]) > 0 || x0 === x1) return;
+    const t = (p[0] - x0) / (x1 - x0);
+    const y = y0 + (y1 - y0) * t;
+    if (y <= p[1]) return;
+    const d = y - p[1];
+    if (!best || d < best.d) best = { d, e };
+  });
+  return best;
+}
+
+function buildEnvelope() {
+  if (!S.siteParcels.length) return;
+  const cs = 0.5;
+  const bcr = parseFloat($('zBcr').value) || 0, far = parseFloat($('zFar').value) || 0;
+  const hIn = parseFloat($('zHmax').value); const hMax = hIn > 0 ? hIn : 100; // 미입력 시 표시 상한 100m
+  const sbRoad = parseFloat($('zSbRoad').value) || 0, sbNb = parseFloat($('zSbNb').value) || 0;
+  const sun = $('zSun').checked, sunRoad = $('zSunRoad').checked;
+  const fh = S.floorH;
+  const edges = siteExteriorEdges();
+  const area = S.siteParcels.reduce((a, p) => a + Math.abs(polyArea(p.ring)), 0);
+  // 높이 기준면: 대지 경계 지반의 평균 (지표면 산정 단순화)
+  const bpts = edges.map((e) => [(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2]);
+  const G0 = bpts.reduce((a, [x, y]) => a + elev(x, y), 0) / Math.max(1, bpts.length);
+  const xs = S.siteParcels.flatMap((p) => p.ring.map((q) => q[0])), ys = S.siteParcels.flatMap((p) => p.ring.map((q) => q[1]));
+  const X0 = Math.floor(Math.min(...xs)), Y0 = Math.floor(Math.min(...ys));
+  const nx = Math.ceil((Math.max(...xs) - X0) / cs), ny = Math.ceil((Math.max(...ys) - Y0) / cs);
+  const cells = [];
+  let sunLimited = 0;
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const p = [X0 + (i + 0.5) * cs, Y0 + (j + 0.5) * cs];
+    if (!S.siteParcels.some((q) => pip(p, q.ring))) continue;
+    let ok = true;
+    for (const e of edges) { const d = segDist(p, e.a, e.b); if (d < (e.road ? sbRoad : sbNb)) { ok = false; break; } }
+    if (!ok) continue;
+    let H = hMax;
+    if (sun) {
+      const hit = northHit(p, edges);
+      if (hit && (!hit.e.road || sunRoad)) {
+        const Hs = hit.d < 1.5 ? 0 : Math.max(10, 2 * hit.d);
+        if (Hs < H) { H = Hs; sunLimited++; }
+      }
+    }
+    const g = elev(p[0], p[1]);
+    const top = G0 + H;
+    const floors = Math.max(0, Math.floor((top - g) / fh + 1e-6));
+    if (floors > 0) cells.push({ i, j, x: p[0], y: p[1], g, floors });
+  }
+  const cellA = cs * cs;
+  const envGFA = cells.reduce((a, c) => a + c.floors * cellA, 0);
+  const envFoot = cells.length * cellA;
+  const maxF = Math.max(0, ...cells.map((c) => c.floors));
+  S.env = { cs, X0, Y0, nx, ny, cells, G0, fh };
+  drawEnvelope();
+  const farGFA = (area * far) / 100, bcrA = (area * bcr) / 100;
+  const govern = envGFA >= farGFA ? `용적률이 규모를 결정 (볼륨 안에 여유 ${(envGFA - farGFA).toFixed(0)}㎡)` : `사선·높이 볼륨이 규모를 결정 (용적률 ${((envGFA / area) * 100).toFixed(0)}%까지만 가능)`;
+  $('envInfo').innerHTML = `
+    대지면적 ${area.toFixed(0)}㎡ · 높이 기준면 +${G0.toFixed(1)}m (경계 평균 지반)<br>
+    <b>최대 건축면적</b> ${bcrA.toFixed(0)}㎡ (건폐율 ${bcr}%) · 볼륨 바닥 ${envFoot.toFixed(0)}㎡<br>
+    <b>최대 연면적</b> ${farGFA.toFixed(0)}㎡ (용적률 ${far}%)<br>
+    <b>볼륨이 담는 연면적</b> ${envGFA.toFixed(0)}㎡ · 최고 ${maxF}층<br>
+    <b>→ ${govern}</b><br>
+    건폐율을 꽉 채우면 평균 ${(farGFA / bcrA).toFixed(1)}개 층 · 정북일조로 낮아진 칸 ${((sunLimited / Math.max(1, cells.length)) * 100).toFixed(0)}%<br>
+    ${hIn > 0 ? '' : '<span class="warn">최고높이 미입력 → 표시 상한 100m</span><br>'}<span class="dim">0.5m 격자 근사 · 층고 ${fh}m · 지표면은 경계 평균으로 단순화 (고저차 3m 초과 시 구간별 산정은 미반영)</span>`;
+}
+function drawEnvelope() {
+  if (S.envGroup) groupCtx.remove(S.envGroup);
+  const E = S.env;
+  if (!E || !$('envShow').checked) return;
+  const grp = new THREE.Group();
+  const geo = new THREE.BoxGeometry(E.cs, 1, E.cs);
+  const mat = new THREE.MeshLambertMaterial({ color: 0x3d6fd9, transparent: true, opacity: 0.35, depthWrite: false });
+  const im = new THREE.InstancedMesh(geo, mat, E.cells.length);
+  const M = new THREE.Matrix4();
+  E.cells.forEach((c, k) => {
+    const h = c.floors * E.fh;
+    M.makeScale(1, h, 1); M.setPosition(c.x, c.g + h / 2, -c.y);
+    im.setMatrixAt(k, M);
+  });
+  grp.add(im);
+  // 층별 외곽선
+  const segs = envOutlines();
+  const arr = [];
+  segs.forEach(([x0, y0, x1, y1, z]) => arr.push(x0, z, -y0, x1, z, -y1));
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
+  grp.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x1a3a8f })));
+  S.envGroup = grp;
+  groupCtx.add(grp);
+}
+// 층 k(1..)의 외곽: floors≥k 인 셀과 아닌 셀 사이의 격자선. z = 셀 지반 + k·층고 (층 상단)
+function envOutlines() {
+  const E = S.env; if (!E) return [];
+  const F = new Map(); E.cells.forEach((c) => F.set(c.i + ',' + c.j, c));
+  const segs = [];
+  const maxF = Math.max(0, ...E.cells.map((c) => c.floors));
+  for (let k = 1; k <= maxF; k++) {
+    E.cells.forEach((c) => {
+      if (c.floors < k) return;
+      const x0 = E.X0 + c.i * E.cs, y0 = E.Y0 + c.j * E.cs, x1 = x0 + E.cs, y1 = y0 + E.cs, z = c.g + k * E.fh;
+      const nb = (di, dj) => { const q = F.get(c.i + di + ',' + (c.j + dj)); return q && q.floors >= k; };
+      if (!nb(0, -1)) segs.push([x0, y0, x1, y0, z, k]);
+      if (!nb(0, 1)) segs.push([x0, y1, x1, y1, z, k]);
+      if (!nb(-1, 0)) segs.push([x0, y0, x0, y1, z, k]);
+      if (!nb(1, 0)) segs.push([x1, y0, x1, y1, z, k]);
+    });
+  }
+  return segs;
+}
+
 // ---------- 내보내기 ----------
 function dxf() {
   const out = ['0', 'SECTION', '2', 'HEADER', '9', '$ACADVER', '1', 'AC1009', '9', '$INSUNITS', '70', '6', '0', 'ENDSEC'];
-  const layers = [['SITE', 1], ['PARCEL', 8], ['BLDG', 7], ['BLDG_ROOF', 9]];
+  const layers = [['SITE', 1], ['PARCEL', 8], ['BLDG', 7], ['BLDG_ROOF', 9], ['ENVELOPE', 5]];
   out.push('0', 'SECTION', '2', 'TABLES', '0', 'TABLE', '2', 'LAYER', '70', String(layers.length));
   layers.forEach(([n, c]) => out.push('0', 'LAYER', '2', n, '70', '0', '62', String(c), '6', 'CONTINUOUS'));
   out.push('0', 'ENDTAB', '0', 'ENDSEC', '0', 'SECTION', '2', 'ENTITIES');
@@ -760,6 +963,7 @@ function dxf() {
     });
   });
   const o = S.origin;
+  envOutlines().forEach(([x0, y0, x1, y1, z]) => out.push('0', 'LINE', '8', 'ENVELOPE', '10', f(x0), '20', f(y0), '30', f(z), '11', f(x1), '21', f(y1), '31', f(z)));
   out.push('0', 'TEXT', '8', 'SITE', '10', '0', '20', '-5', '30', '0', '40', '1.5', '1', `ORIGIN lon ${o.lon.toFixed(7)} lat ${o.lat.toFixed(7)} (unit m)`);
   out.push('0', 'ENDSEC', '0', 'EOF');
   return out.join('\r\n');
@@ -799,6 +1003,10 @@ function init() {
   $('showContours').onchange = () => S.origin && buildScene(false);
   $('hideSiteBldg').onchange = () => S.origin && buildScene(false);
   $('secEx').onchange = () => S.sectionPts.length === 2 && drawSection();
+  $('zSel').innerHTML = '<option value="">선택</option>' + Object.keys(ZONES).map((z) => `<option>${z}</option>`).join('');
+  $('zSel').onchange = applyZoneDefaults;
+  $('btnEnv').onclick = () => buildEnvelope();
+  $('envShow').onchange = () => drawEnvelope();
   $('secClose').onclick = () => { $('sectionBox').style.display = 'none'; };
   $('floorH').onchange = (e) => {
     S.floorH = parseFloat(e.target.value) || 3.3;
