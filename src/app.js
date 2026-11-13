@@ -1456,7 +1456,39 @@ async function scaleStudy() {
   {
     const groundA = Math.max(0, area - footA);
     const ls = landscapeRate(area, gfa, zoneNow), need = area * ls.rate;
-    lawRows += `<tr><td>조경</td><td>${ls.rate ? `<b>${need.toFixed(1)}㎡</b> 이상 <span class="dim">(${ls.why})</span><br>지상 빈 땅 ${groundA.toFixed(0)}㎡ <b class="${groundA >= need ? 'ok' : 'warn'}">${groundA >= need ? '확보 가능' : '부족 — 옥상조경 등 필요'}</b>` : `<span class="dim">${ls.why}</span>`}</td></tr>`;
+    // 옥상조경(시행령 27조③): 면적의 2/3 인정, 필요 조경면적의 50%까지
+    const short = Math.max(0, need - groundA), roofOk = short <= need * 0.5 + 1e-6;
+    const roofTxt = short > 0 ? `<br>부족 ${short.toFixed(1)}㎡ → 옥상조경 <b>${(short * 1.5).toFixed(1)}㎡</b> 필요 (2/3 인정) <b class="${roofOk ? 'ok' : 'warn'}">${roofOk ? '50% 한도 안' : '50% 한도 초과 — 지상 조경 늘려야 함'}</b>` : '';
+    lawRows += `<tr><td>조경</td><td>${ls.rate ? `<b>${need.toFixed(1)}㎡</b> 이상 <span class="dim">(${ls.why})</span><br>지상 빈 땅 ${groundA.toFixed(0)}㎡ <b class="${groundA >= need ? 'ok' : 'warn'}">${groundA >= need ? '확보 가능' : '부족'}</b>${roofTxt}` : `<span class="dim">${ls.why}</span>`}</td></tr>`;
+    // 접도(건축법 44조, 시행령 28조): 도로에 2m 이상 접함 / 연면적 2,000㎡(공장 3,000㎡) 이상 → 너비 6m 이상 도로에 4m 이상
+    {
+      const touch = new Map();
+      edges.filter((e) => e.road).forEach((e) => { const r = roadOf([(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2]); if (r && r.kind === '도로') touch.set(r, (touch.get(r) || 0) + Math.hypot(e.b[0] - e.a[0], e.b[1] - e.a[1])); });
+      const tot = [...touch.values()].reduce((a, b) => a + b, 0);
+      const big = gfa >= (/공장/.test(use) ? 3000 : 2000);
+      const wide = [...touch].filter(([r, L]) => (r.width || 0) >= 6 && L >= 4);
+      const ok1 = tot >= 2, ok2 = !big || wide.length > 0;
+      lawRows += `<tr><td>접도</td><td>도로 접합 ${tot.toFixed(1)}m <b class="${ok1 ? 'ok' : 'warn'}">${ok1 ? '2m 이상 적합' : '2m 미만 — 건축 불가(맹지)'}</b>` +
+        (big ? `<br>연면적 ${gfa.toFixed(0)}㎡ → 6m 이상 도로에 4m 이상 접해야 함 <b class="${ok2 ? 'ok' : 'warn'}">${ok2 ? '적합 (' + wide.map(([r, L]) => `${r.name} ${L.toFixed(1)}m`).join(', ') + ')' : '부적합'}</b>` : '') + '</td></tr>';
+      // 대지와 도로의 높이(건축법 40조①): 대지는 인접 도로면보다 낮으면 안 됨
+      if (T.ready && touch.size) {
+        const low = [...touch.keys()].map((r) => { const zs = r.pts.map((q) => elev(q.x, q.y)); return { r, z: zs.reduce((a, b) => a + b, 0) / zs.length }; }).filter((o) => o.z > G0 + 0.05);
+        lawRows += `<tr><td>대지·도로 높이</td><td>${low.length ? `<b class="warn">대지(+${G0.toFixed(2)})가 ${low.map((o) => `${o.r.name}(+${o.z.toFixed(2)})`).join(', ')}보다 낮음</b> — 배수에 지장 없거나 방습 조치 시 예외 (40조① 단서)` : '<b class="ok">대지가 접한 도로보다 낮지 않음</b>'}</td></tr>`;
+      }
+    }
+    // 대지 고저차 → 옹벽·단·굴토 (시행규칙 25·26조, 서울 굴토심의)
+    if (T.ready) {
+      const zs = [];
+      site.forEach((q) => densify(fromP(q), 1).forEach((pt) => zs.push(elev(pt[0], pt[1]))));
+      const dz = zs.length ? Math.max(...zs) - Math.min(...zs) : 0, w = [];
+      if (dz >= 1) w.push('1m 이상 → 경사 1:1.5보다 급하면 옹벽 설치');
+      if (dz >= 2) w.push('2m 이상 → 콘크리트 구조 옹벽');
+      if (dz > 3) w.push('3m 초과 경사면 → 높이 3m마다 단(小段)');
+      if (dz >= 5) w.push('옹벽 5m 이상 → 서울 굴토심의 대상');
+      lawRows += `<tr><td>대지 고저차</td><td>${dz.toFixed(2)}m${w.length ? '<br>' + w.join('<br>') : ' <span class="dim">(옹벽 기준 미만)</span>'}<br><span class="dim">성토는 인접 지반보다 0.5m 이상 높이지 않음 · 굴착 10m 이상 또는 지하 2층 이상 → 굴토심의</span></td></tr>`;
+    }
+    // 옥탑(시행령 119조①5): 수평투영면적 합계 ≤ 건축면적 1/8 이면 12m까지 높이 불산입
+    if (footA > 0) lawRows += `<tr><td>옥탑</td><td>계단탑·승강기탑 합계 <b>${(footA / 8).toFixed(1)}㎡</b> 이하 → 높이 12m까지 불산입 <span class="dim">(층수 불산입, 건축면적 1/8)</span></td></tr>`;
     const ps = publicSpace(use, gfa, zoneNow);
     lawRows += `<tr><td>공개공지</td><td>${ps ? `<b>${(area * ps.rate).toFixed(1)}㎡</b> 이상 <span class="dim">(대지 10%, 확보 시 용적률 최대 ×(1+공개공지/대지) 완화)</span>` : '<span class="dim">대상 아님 (지역·용도·5,000㎡ 기준)</span>'}</td></tr>`;
     if (osb.why.length) lawRows += `<tr><td>대지 안의 공지</td><td>${osb.why.join('<br>')}</td></tr>`;
@@ -1482,7 +1514,13 @@ async function scaleStudy() {
     const fits = PM ? PM.ok && cap >= n : null;
     const hc = n >= 10 ? Math.ceil(n * 0.03) : 0; // 장애인전용주차구역: 부설주차장 3% 이상, 10대 미만 제외, 끝수 올림
     pInfo = `<tr><td>주차</td><td>필요 <b>${n}대</b> <span class="dim">(시설면적 ${(gfa + (A1 - parkA)).toFixed(0)}㎡ ÷ ${basis})</span>` + (hc ? `<br>장애인전용 <b>${hc}대</b> 이상 (3.3 × 5.0m)` : n ? '<br><span class="dim">10대 미만 → 장애인전용 의무 없음</span>' : '') +
-      (PM ? (PM.ok ? `<br>지하 모듈 16 × ${PM.L.toFixed(1)}m → 최대 ${cap}대 <b class="${fits ? 'ok' : 'warn'}">${fits ? '수용' : '부족'}</b> · 주차구역 약 ${parkA.toFixed(0)}㎡` : '<br><b class="warn">건축가능 폭이 16m보다 좁아 양측 주차 모듈 불가</b>') : '') + '</td></tr>';
+      (PM ? (PM.ok ? `<br>지하 모듈 16 × ${PM.L.toFixed(1)}m → 최대 ${cap}대 <b class="${fits ? 'ok' : 'warn'}">${fits ? '수용' : '부족'}</b> · 주차구역 약 ${parkA.toFixed(0)}㎡` : '<br><b class="warn">건축가능 폭이 16m보다 좁아 양측 주차 모듈 불가</b>') : '') + (n ? (() => {
+        // 주차장법 시행규칙 6조·11조: 출입구 폭, 경사로 구배, 출입구 금지 도로
+        const gate = n <= 8 ? 3.0 : n < 50 ? 3.5 : 5.5;
+        const okRoads = (S.roads || []).filter((r) => r.kind === '도로' && (r.width || 0) >= (n >= 200 ? 6 : 4)).map((r) => r.name);
+        return `<br>출입구 폭 <b>${gate}m</b> 이상${n >= 50 ? ' (또는 입·출구 분리)' : ''} · 램프 직선 17%↓ → 지하 1층 길이 약 <b>${(fh / 0.17).toFixed(1)}m</b> (곡선 14%↓ ${(fh / 0.14).toFixed(1)}m)` +
+          `<br><span class="dim">출입구 가능 도로: ${okRoads.length ? okRoads.join(', ') : '<b class=warn>없음 — 너비 ' + (n >= 200 ? 6 : 4) + 'm 미만</b>'} · 횡단보도 5m·교차로 이내 금지</span>`;
+      })() : '') + '</td></tr>';
   }
   let bInfo = '';
   if ($('zBase').checked && floors.length) {
