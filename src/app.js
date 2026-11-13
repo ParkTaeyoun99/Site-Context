@@ -861,6 +861,7 @@ async function buildEnvelope() {
   const hIn = parseFloat($('zHmax').value); const hMax = hIn > 0 ? hIn : 30; // 미입력 시 표시 상한 30m
   const sbRoad = parseFloat($('zSbRoad').value) || 0, sbNb = parseFloat($('zSbNb').value) || 0;
   const sun = $('zSun').checked, sunRoad = $('zSunRoad').checked;
+  const sunD = Math.max(1.5, parseFloat($('zSunD').value) || 1.5); // 시행령: 1.5m 이상 범위에서 건축조례로 정함
   const fh = S.floorH;
   const edges = siteExteriorEdges();
   const area = S.siteParcels.reduce((a, p) => a + Math.abs(polyArea(p.ring)), 0);
@@ -910,7 +911,7 @@ async function buildEnvelope() {
     let H = hMax;
     if (c.ref && resid(c.ref.parcel && c.ref.parcel.zoneName)) {
       const d = c.ref.y - c.p[1];
-      const Hs = d < 1.5 ? 0 : Math.max(10, 2 * d);
+      const Hs = d < sunD ? 0 : Math.max(10, 2 * d);
       if (Hs < H) { H = Hs; sunLimited++; }
       refPts.push([c.p[0], c.ref.y]);
     }

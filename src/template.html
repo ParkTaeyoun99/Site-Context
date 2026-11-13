@@ -67,7 +67,7 @@
     <label>건폐율 <input id="zBcr" type="number" value="60"> % &nbsp; 용적률 <input id="zFar" type="number" value="200"> %</label>
     <label>최고높이 <input id="zHmax" type="number" placeholder="없음"> m <span class="sub">(가로구역·지구단위계획)</span></label>
     <label>후퇴: 도로측 <input id="zSbRoad" type="number" step="0.5" value="0"> m · 인접대지 <input id="zSbNb" type="number" step="0.5" value="0.5"> m</label>
-    <label><input id="zSun" type="checkbox" checked> 정북 일조사선 (10m 이하 1.5m, 초과 H/2)</label>
+    <label><input id="zSun" type="checkbox" checked> 정북 일조사선 — 10m 이하 <input id="zSunD" type="number" step="0.1" value="1.5" style="width:52px"> m 이격 (조례값, 최소 1.5) · 10m 초과 H/2 <span class="sub">(시행령 86조, 2023.9.12 개정)</span></label>
     <label><input id="zSunRoad" type="checkbox" checked> 북측 도로·철도는 건너편 대지경계선 기준 (시행령 86조⑥)</label>
     <button id="btnEnv" class="primary">최대 볼륨 생성</button>
     <label><input id="envShow" type="checkbox" checked> 볼륨 표시</label>
