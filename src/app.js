@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import ClipperLib from 'clipper-lib';
 
 // ---------- 상태 ----------
 const S = {
@@ -196,7 +197,7 @@ async function loadVWorld() {
   // 대지 안의 기존 건물 표시
   S.buildings.forEach((b) => { b.onSite = S.siteParcels.some((sp) => pip(centroid(b.ring), sp.ring)); });
   log(`필지 ${S.parcels.length} · 건물 ${S.buildings.length} 불러옴` + (noFloor ? ` (층수 없는 건물 ${noFloor}개는 2층으로 가정)` : ''), 'ok');
-  T.ready = false; S.env = null;
+  T.ready = false; S.env = null; S.mass = null;
   buildScene(true);
   await sampleTerrain();
   await loadZoning();
@@ -222,7 +223,7 @@ function loadDemo() {
     const floors = 1 + Math.floor(rnd() * (gx > 40 ? 18 : 6));
     S.buildings.push({ id: 'b' + id++, ring: [[gx + 3, gy + 3], [gx + 23, gy + 3], [gx + 23, gy + 19], [gx + 3, gy + 19]], floors, height: floors * S.floorH, heightSrc: 'floors', ground, props: { 비고: '데모 가상 건물' } });
   }
-  T.ready = false; S.env = null;
+  T.ready = false; S.env = null; S.mass = null;
   log('데모 데이터(가상)를 불러왔습니다. 실제 대지는 V-World 키로 불러오세요.', 'warn');
   buildScene(true);
 }
@@ -465,6 +466,7 @@ function buildScene(resetCam) {
   groupCtx.add(n);
   drawRoads();
   S.envGroup = null; drawEnvelope();
+  S.massGroup = null; drawMass();
   if (S.mode === 'view') runViewAnalysis();
   updateStats();
   if (resetCam) { camera.position.set(S.radius * 1.1, S.radius * 1.3, S.radius * 1.3); controls.target.set(0, 0, 0); }
@@ -1032,10 +1034,188 @@ function envOutlines() {
   return segs;
 }
 
+// ================= 규모검토 (층별 바닥판) =================
+const CS = 100; // Clipper 정수 좌표 배율 (cm)
+const toP = (ring) => ring.map(([x, y]) => ({ X: Math.round(x * CS), Y: Math.round(y * CS) }));
+const fromP = (path) => path.map((q) => [q.X / CS, q.Y / CS]);
+function clip(a, b, type) {
+  const c = new ClipperLib.Clipper(), out = new ClipperLib.Paths();
+  c.AddPaths(a, ClipperLib.PolyType.ptSubject, true);
+  if (b) c.AddPaths(b, ClipperLib.PolyType.ptClip, true);
+  c.Execute(type, out, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  return out;
+}
+const uni = (a) => clip(a, null, ClipperLib.ClipType.ctUnion);
+const inter = (a, b) => clip(a, b, ClipperLib.ClipType.ctIntersection);
+const diff = (a, b) => clip(a, b, ClipperLib.ClipType.ctDifference);
+function offs(paths, d, open) {
+  const o = new ClipperLib.ClipperOffset(2, 25), out = new ClipperLib.Paths();
+  o.AddPaths(paths, ClipperLib.JoinType.jtMiter, open ? ClipperLib.EndType.etOpenButt : ClipperLib.EndType.etClosedPolygon);
+  o.Execute(out, d * CS);
+  return out;
+}
+const pArea = (paths) => paths.reduce((a, q) => a + ClipperLib.Clipper.Area(q), 0) / (CS * CS);
+function cleanPaths(paths) { return ClipperLib.Clipper.CleanPolygons(paths, 0.05 * CS).filter((q) => Math.abs(ClipperLib.Clipper.Area(q)) > 0.5 * CS * CS); }
+// 원하는 면적 이하가 되도록 균일하게 안으로 줄이기
+function shrinkTo(paths, target) {
+  if (pArea(paths) <= target) return paths;
+  let lo = 0, hi = 30, best = [];
+  for (let k = 0; k < 22; k++) {
+    const m = (lo + hi) / 2, r = cleanPaths(offs(paths, -m));
+    if (pArea(r) > target) lo = m; else { hi = m; best = r; }
+  }
+  return best;
+}
+function pathsToShapes(paths) {
+  const outers = [], holes = [];
+  paths.forEach((q) => (ClipperLib.Clipper.Area(q) > 0 ? outers : holes).push(fromP(q)));
+  const shapes = outers.map((r) => ({ ring: r, holes: [] }));
+  holes.forEach((h) => { const sh = shapes.find((s) => pip(h[0], s.ring)); if (sh) sh.holes.push(h); });
+  return shapes.map(({ ring, holes }) => {
+    const s = shapeFrom(ring);
+    holes.forEach((h) => s.holes.push(new THREE.Path(h.map(([x, y]) => new THREE.Vector2(x, y)))));
+    return s;
+  });
+}
+
+async function scaleStudy() {
+  if (!S.siteParcels.length) return;
+  const bcr = parseFloat($('zBcr').value) || 0, far = parseFloat($('zFar').value) || 0;
+  const hIn = parseFloat($('zHmax').value), hMax = hIn > 0 ? hIn : Infinity;
+  const sbRoad = parseFloat($('zSbRoad').value) || 0, sbNb = parseFloat($('zSbNb').value) || 0;
+  const sun = $('zSun').checked, sunRoad = $('zSunRoad').checked, sunNew = $('zSunRule').value === 'new';
+  const sunD = Math.max(1.5, parseFloat($('zSunD').value) || 1.5), sunD2 = Math.max(5, parseFloat($('zSunD2').value) || 5);
+  const fh = S.floorH;
+  const area = S.siteParcels.reduce((a, p) => a + Math.abs(polyArea(p.ring)), 0);
+  const bcrA = (area * bcr) / 100, farGFA = (area * far) / 100;
+  // 1) 대지 외곽 (필지 합치기) — 미세한 틈은 닫고
+  const site = cleanPaths(offs(offs(uni(S.siteParcels.map((p) => toP(p.ring))), 0.05), -0.05));
+  const edges = siteExteriorEdges();
+  const bpts = edges.map((e) => [(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2]);
+  const G0 = bpts.reduce((a, [x, y]) => a + elev(x, y), 0) / Math.max(1, bpts.length);
+  // 2) 이격: 경계 조각마다 도로/인접대지 거리만큼 띠를 만들어 빼기
+  let buildable = site;
+  const bands = [];
+  edges.forEach((e) => { const d = e.road ? sbRoad : sbNb; if (d > 0) bands.push(...offs([toP([e.a, e.b])], d, true)); });
+  if (bands.length) buildable = cleanPaths(diff(site, uni(bands)));
+  // 3) 정북 기준선: x 0.5m 간격으로, 대지 가장 북쪽 경계 → (도로면 건너편까지) 인접 대지경계
+  const xs = S.siteParcels.flatMap((p) => p.ring.map((q) => q[0]));
+  const xmin = Math.min(...xs), xmax = Math.max(...xs);
+  const cols = [];
+  for (let x = xmin + 0.01; x <= xmax; x += 0.5) {
+    let top = null;
+    edges.forEach((e) => {
+      const [x0, y0] = e.a, [x1, y1] = e.b;
+      if ((x0 - x) * (x1 - x) > 0 || x0 === x1) return;
+      const y = y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
+      if (!top || y > top.y) top = { y, e };
+    });
+    if (!top) continue;
+    let ref = null;
+    if (!top.e.road) ref = { y: top.y, parcel: S.parcels.find((q) => pip([x, top.y + 0.5], q.ring)) || null };
+    else if (sunRoad) ref = marchNorth(x, top.y + 0.05);
+    cols.push({ x, ref });
+  }
+  const refParcels = [...new Set(cols.map((c) => c.ref && c.ref.parcel).filter(Boolean))];
+  if (!S.demo) for (const rp of refParcels) {
+    if (rp.zoneName !== undefined) continue;
+    try { const ip = interiorPoint(rp.ring); const z = await vwPoint('LT_C_UQ111', ip[0], ip[1]); rp.zoneName = z.length ? z[0].uname : null; } catch (e) { rp.zoneName = null; }
+  }
+  const resid = (z) => !z || /전용주거|일반주거/.test(z);
+  cols.forEach((c) => { c.refY = sun && c.ref && resid(c.ref.parcel && c.ref.parcel.zoneName) ? c.ref.y : Infinity; });
+  const req = (h) => (h <= 10 ? sunD : sunNew ? (h <= 17 ? sunD2 : h / 2) : h / 2);
+  const BIG = 1e4;
+  function sunRegion(h) { // 높이 h(기준면 위)인 부분이 놓일 수 있는 영역
+    if (!sun || cols.every((c) => c.refY === Infinity)) return null;
+    const d = req(h), pts = [[xmin - 5, -BIG]];
+    cols.forEach((c) => pts.push([c.x, c.refY === Infinity ? BIG : c.refY - d]));
+    pts.push([xmax + 5, pts[pts.length - 1][1]], [xmax + 5, -BIG]);
+    pts.splice(1, 0, [xmin - 5, pts[1][1]]);
+    return [toP(pts)];
+  }
+  const limit = (paths, h) => { const r = sunRegion(h); return r ? cleanPaths(inter(paths, r)) : paths; };
+  // 4) 건축면적: 1층 가능 영역을 건폐율까지
+  const avail1 = limit(buildable, fh);
+  const foot = shrinkTo(avail1, bcrA);
+  const footA = pArea(foot);
+  // 5) 층 쌓기: 정북사선·최고높이 안에서, 용적률 한도까지
+  const floors = [];
+  let gfa = 0;
+  for (let k = 1; k <= 80; k++) {
+    const top = k * fh;
+    if (top > hMax + 1e-6) break;
+    let plate = k === 1 ? foot : limit(foot, top);
+    let a = pArea(plate);
+    if (a < 10) break;
+    const remain = farGFA - gfa;
+    let partial = false;
+    if (a > remain) {
+      if (remain < Math.max(20, a * 0.15)) break;
+      plate = shrinkTo(plate, remain); a = pArea(plate); partial = true;
+    }
+    floors.push({ k, top, plate, area: a, partial });
+    gfa += a;
+    if (partial) break;
+  }
+  S.mass = { G0, fh, floors, buildable, foot, site };
+  drawMass();
+  const maxH = floors.length ? floors[floors.length - 1].top : 0;
+  const govern = gfa >= farGFA - 1 ? '용적률' : floors.length && floors[floors.length - 1].top + fh > hMax ? '최고높이' : '정북일조사선·이격';
+  $('massInfo').innerHTML = `
+    <table class="tbl"><tr><th>층</th><th>바닥면적</th><th>누계</th></tr>
+    ${floors.slice().reverse().map((f) => `<tr${f.partial ? ' class="part"' : ''}><td>${f.k}F</td><td>${f.area.toFixed(1)}㎡</td><td>${floors.filter((g) => g.k <= f.k).reduce((a, g) => a + g.area, 0).toFixed(1)}</td></tr>`).join('')}
+    </table>
+    <table class="tbl sum">
+      <tr><td>대지면적</td><td>${area.toFixed(1)}㎡</td></tr>
+      <tr><td>건축면적</td><td>${footA.toFixed(1)}㎡ <span class="dim">(한도 ${bcrA.toFixed(1)})</span></td></tr>
+      <tr><td>건폐율</td><td><b>${((footA / area) * 100).toFixed(2)}%</b> <span class="dim">/ ${bcr}%</span></td></tr>
+      <tr><td>연면적(지상)</td><td>${gfa.toFixed(1)}㎡ <span class="dim">(한도 ${farGFA.toFixed(1)})</span></td></tr>
+      <tr><td>용적률</td><td><b>${((gfa / area) * 100).toFixed(2)}%</b> <span class="dim">/ ${far}%</span></td></tr>
+      <tr><td>규모</td><td>지상 ${floors.length}층 · 높이 ${maxH.toFixed(1)}m</td></tr>
+      <tr><td>규모 결정</td><td><b>${govern}</b></td></tr>
+    </table>
+    <span class="dim">층고 ${fh}m · 높이 기준면 +${G0.toFixed(1)}m(경계 평균 지반) · 건폐율 초과분은 외곽을 균일하게 줄여 맞춤 · 최상층은 남은 용적률만큼 축소</span>`;
+}
+function drawMass() {
+  if (S.massGroup) groupCtx.remove(S.massGroup);
+  const M = S.mass;
+  if (!M || !$('massShow').checked) return;
+  const grp = new THREE.Group();
+  const mat = new THREE.MeshLambertMaterial({ color: 0xf4f1ea });
+  const matTop = new THREE.MeshLambertMaterial({ color: 0xf7d9a8 });
+  const edgeMat = new THREE.LineBasicMaterial({ color: 0x222222 });
+  M.floors.forEach((f) => {
+    const base = f.k === 1 ? Math.min(M.G0, ...fromP(M.foot.flat ? M.foot[0] : M.foot).map(([x, y]) => elev(x, y))) : M.G0 + (f.k - 1) * M.fh;
+    const topZ = M.G0 + f.top;
+    pathsToShapes(f.plate).forEach((sh) => {
+      const g = new THREE.ExtrudeGeometry(sh, { depth: topZ - base - 0.12, bevelEnabled: false });
+      g.rotateX(-Math.PI / 2);
+      const m = new THREE.Mesh(g, f.partial ? matTop : mat);
+      m.position.y = base; m.castShadow = m.receiveShadow = true;
+      grp.add(m);
+      const e = new THREE.LineSegments(new THREE.EdgesGeometry(g, 20), edgeMat);
+      e.position.y = base; grp.add(e);
+    });
+    const lab = textSprite(`${f.k}F ${f.area.toFixed(0)}㎡`, '#333');
+    const c = fromP(f.plate[0])[0];
+    lab.scale.multiplyScalar(0.55);
+    lab.position.set(c[0], topZ - M.fh / 2, -c[1]);
+    grp.add(lab);
+  });
+  // 건축 가능 영역(이격 반영) 바닥선
+  M.buildable.forEach((q) => {
+    const r = fromP(q); r.push(r[0]);
+    const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints(r.map(([x, y]) => new THREE.Vector3(x, elev(x, y) + 0.35, -y))), new THREE.LineDashedMaterial({ color: 0x1e8449, dashSize: 0.8, gapSize: 0.5 }));
+    ln.computeLineDistances(); grp.add(ln);
+  });
+  S.massGroup = grp;
+  groupCtx.add(grp);
+}
+
 // ---------- 내보내기 ----------
 function dxf() {
   const out = ['0', 'SECTION', '2', 'HEADER', '9', '$ACADVER', '1', 'AC1009', '9', '$INSUNITS', '70', '6', '0', 'ENDSEC'];
-  const layers = [['SITE', 1], ['PARCEL', 8], ['BLDG', 7], ['BLDG_ROOF', 9], ['ENVELOPE', 5]];
+  const layers = [['SITE', 1], ['PARCEL', 8], ['BLDG', 7], ['BLDG_ROOF', 9], ['ENVELOPE', 5], ['MASS', 3], ['BUILDABLE', 3]];
   out.push('0', 'SECTION', '2', 'TABLES', '0', 'TABLE', '2', 'LAYER', '70', String(layers.length));
   layers.forEach(([n, c]) => out.push('0', 'LAYER', '2', n, '70', '0', '62', String(c), '6', 'CONTINUOUS'));
   out.push('0', 'ENDTAB', '0', 'ENDSEC', '0', 'SECTION', '2', 'ENTITIES');
@@ -1060,7 +1240,11 @@ function dxf() {
     });
   });
   const o = S.origin;
-  envOutlines().forEach(([x0, y0, x1, y1, z]) => out.push('0', 'LINE', '8', 'ENVELOPE', '10', f(x0), '20', f(y0), '30', f(z), '11', f(x1), '21', f(y1), '31', f(z)));
+  if (S.mass) {
+    S.mass.floors.forEach((fl) => fl.plate.forEach((q) => poly(fromP(q), 'MASS', S.mass.G0 + (fl.k - 1) * S.mass.fh, S.mass.fh)));
+    S.mass.buildable.forEach((q) => poly(fromP(q), 'BUILDABLE', S.mass.G0));
+  }
+  if (S.env && $('envShow').checked) envOutlines().forEach(([x0, y0, x1, y1, z]) => out.push('0', 'LINE', '8', 'ENVELOPE', '10', f(x0), '20', f(y0), '30', f(z), '11', f(x1), '21', f(y1), '31', f(z)));
   out.push('0', 'TEXT', '8', 'SITE', '10', '0', '20', '-5', '30', '0', '40', '1.5', '1', `ORIGIN lon ${o.lon.toFixed(7)} lat ${o.lat.toFixed(7)} (unit m)`);
   out.push('0', 'ENDSEC', '0', 'EOF');
   return out.join('\r\n');
@@ -1102,7 +1286,12 @@ function init() {
   $('secEx').onchange = () => S.sectionPts.length === 2 && drawSection();
   $('zSel').innerHTML = '<option value="">선택</option>' + Object.keys(ZONES).map((z) => `<option>${z}</option>`).join('');
   $('zSel').onchange = applyZoneDefaults;
-  $('btnEnv').onclick = () => buildEnvelope().catch((e) => { $('envInfo').textContent = '오류: ' + e.message; });
+  $('btnEnv').onclick = async () => {
+    try { $('massInfo').textContent = '계산 중…'; await scaleStudy(); if ($('envShow').checked) await buildEnvelope(); else { S.env = null; drawEnvelope(); $('envInfo').textContent = ''; } }
+    catch (e) { $('massInfo').textContent = '오류: ' + e.message; console.error(e); }
+  };
+  $('massShow').onchange = () => drawMass();
+  $('envShow').onchange = async () => { if ($('envShow').checked) await buildEnvelope(); else drawEnvelope(); };
   $('envShow').onchange = () => drawEnvelope();
   $('secClose').onclick = () => { $('sectionBox').style.display = 'none'; };
   $('floorH').onchange = (e) => {

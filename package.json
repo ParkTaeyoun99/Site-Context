@@ -6,6 +6,7 @@
     "build": "node build.mjs"
   },
   "dependencies": {
+    "clipper-lib": "^6.4.2",
     "three": "^0.187.0"
   },
   "devDependencies": {
