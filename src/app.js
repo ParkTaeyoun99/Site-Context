@@ -610,9 +610,15 @@ function drawRoads() {
   const all = S.roads.map((r) => r.avg);
   const diff = Math.max(...all) - Math.min(...all);
   const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
-  box.innerHTML = S.roads.map((r, i) => `<input class="rname" data-ri="${i}" value="${r.name.replace(/"/g, '&quot;')}" title="이름 고치기"> ${r.name.includes(r.kind) ? '' : r.dir + '측 ' + r.kind + ' '}· 접도 ${r.len.toFixed(0)}m${r.width ? ` · 폭 약 ${r.width.toFixed(1)}m` + (r.kind === '도로' && r.width < 4 ? ' <b class="warn">(4m 미만 → 확폭 ' + ((4 - r.width) / 2).toFixed(2) + 'm 후퇴)</b>' : '') : ''} · 평균 ${fmt(r.avg)}m (${fmt(r.lo)} ~ ${fmt(r.hi)}) · 경사 ${r.slope.toFixed(1)}%`).join('<br>') +
+  box.innerHTML = S.roads.map((r, i) => `<input class="rname" data-ri="${i}" value="${r.name.replace(/"/g, '&quot;')}" title="이름 고치기"> ${r.name.includes(r.kind) ? '' : r.dir + '측 ' + r.kind + ' '}· 접도 ${r.len.toFixed(0)}m${r.width ? ` · 폭 약 ${r.width.toFixed(1)}m` + (r.kind === '도로' && r.width < 4 ? ' <b class="warn">(4m 미만 → 확폭 ' + ((4 - r.width) / 2).toFixed(2) + 'm 후퇴)</b>' : '') : ''} · 평균 ${fmt(r.avg)}m (${fmt(r.lo)} ~ ${fmt(r.hi)}) · 경사 ${r.slope.toFixed(1)}% · 건축한계선 <input class="rlim" data-ri="${i}" type="number" step="0.5" style="width:48px" placeholder="-" value="${(S.roadLimits && S.roadLimits[r.key]) || ''}">m`).join('<br>') +
     (S.roads.length > 1 ? `<br><b>접도 간 높이차 ${diff.toFixed(1)}m</b> (평균 기준) · 최대 ${(Math.max(...S.roads.map((r) => r.hi)) - Math.min(...S.roads.map((r) => r.lo))).toFixed(1)}m` : '') +
     `<br><span class="dim">기준 0 = 대지 최저점 (해발 ${T.base.toFixed(1)}m). 경계 밖 1.5m 지점의 지형 높이. 이름 칸을 눌러 고칠 수 있어요.</span>`;
+  box.querySelectorAll('input.rlim').forEach((inp) => (inp.onchange = () => {
+    const r = S.roads[+inp.dataset.ri], v = parseFloat(inp.value);
+    S.roadLimits = S.roadLimits || {};
+    if (v > 0) S.roadLimits[r.key] = v; else delete S.roadLimits[r.key];
+    log(`${r.name} 건축한계선 ${v > 0 ? v + 'm' : '없음'} — 규모검토를 다시 실행하세요.`, 'ok');
+  }));
   box.querySelectorAll('input.rname').forEach((inp) => (inp.onchange = () => {
     const r = S.roads[+inp.dataset.ri], v = inp.value.trim();
     S.roadNames = S.roadNames || {};
@@ -1243,7 +1249,12 @@ async function scaleStudy() {
   roads.filter((r) => r.kind === '도로' && r.width && r.width < 4 && useWiden).forEach((r) => notes.push(`${r.name} 폭 ${r.width.toFixed(1)}m → 건축선 ${((4 - r.width) / 2).toFixed(2)}m 후퇴`));
   let buildable = site;
   const bands = [];
-  edges.forEach((e) => { const d = (e.road ? sbRoad : sbNb) + (e.widen || 0); if (d > 0) bands.push(...offs([toP([e.a, e.b])], d, true)); });
+  edges.forEach((e) => {
+    let d = (e.road ? sbRoad : sbNb) + (e.widen || 0);
+    if (e.road) { const r = roadOf([(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2]); const lim = r && S.roadLimits && S.roadLimits[r.key]; if (lim) { d = Math.max(d, lim + (e.widen || 0)); e.limit = lim; } }
+    if (d > 0) bands.push(...offs([toP([e.a, e.b])], d, true));
+  });
+  roads.filter((r) => S.roadLimits && S.roadLimits[r.key]).forEach((r) => notes.push(`${r.name} 건축한계선 ${S.roadLimits[r.key]}m`));
   //    A2 가각전제(시행령 31조): 8m 미만 도로가 120° 미만으로 만나는 모퉁이를 표의 길이만큼 자름
   const widenStrips = [];
   edges.forEach((e) => { if (e.widen > 0) widenStrips.push(...offs([toP([e.a, e.b])], e.widen, true)); });
@@ -1344,7 +1355,30 @@ async function scaleStudy() {
     }
     floors = [];
     if (best) {
-      if ($('zHigh').checked && T.ready) {
+      const modW = 16; // 지하주차 모듈: 주차 5 + 차로 6 + 주차 5
+      let modFoot = null;
+      if ($('zModule').checked) {
+        // 건축가능 영역의 긴 축을 따라 폭 16m 직사각형을 세우고, 지반 높은 쪽 끝에 붙임
+        const pts = fromP(best.av[0] || []);
+        const cx = pts.reduce((a, q) => a + q[0], 0) / pts.length, cy = pts.reduce((a, q) => a + q[1], 0) / pts.length;
+        let sxx = 0, syy = 0, sxy = 0; pts.forEach((q) => { sxx += (q[0] - cx) ** 2; syy += (q[1] - cy) ** 2; sxy += (q[0] - cx) * (q[1] - cy); });
+        const th = 0.5 * Math.atan2(2 * sxy, sxx - syy), ux = Math.cos(th), uy = Math.sin(th), vx = -uy, vy = ux;
+        const pu = pts.map((q) => (q[0] - cx) * ux + (q[1] - cy) * uy), pv = pts.map((q) => (q[0] - cx) * vx + (q[1] - cy) * vy);
+        const u0 = Math.min(...pu), u1 = Math.max(...pu), v0 = Math.min(...pv), v1 = Math.max(...pv);
+        if (v1 - v0 >= modW - 0.01) {
+          const L = best.A / modW, vm = (v0 + v1) / 2;
+          const hiEnd = T.ready ? elev(cx + ux * u1, cy + uy * u1) >= elev(cx + ux * u0, cy + uy * u0) : true;
+          const useHigh = $('zHigh').checked;
+          const a0 = useHigh ? (hiEnd ? u1 - L : u0) : (u0 + u1) / 2 - L / 2, a1 = a0 + L;
+          const P = (u, v) => [cx + ux * u + vx * v, cy + uy * u + vy * v];
+          const rect = [toP([P(a0, vm - modW / 2), P(a1, vm - modW / 2), P(a1, vm + modW / 2), P(a0, vm + modW / 2)])];
+          const r = cleanPaths(inter(rect, best.av));
+          if (pArea(r) >= best.A - 1) { modFoot = r; S.parkModule = { W: modW, L, ok: true }; }
+        }
+        if (!modFoot) S.parkModule = { W: modW, ok: false };
+      } else S.parkModule = null;
+      if (modFoot) foot = modFoot;
+      else if ($('zHigh').checked && T.ready) {
         // 지하층 유리 배치: 대지의 오르막 방향으로 반평면을 밀어 필요한 면적만큼 높은 쪽을 자름
         const pts = fromP(best.av[0] || []); let gx = 0, gy = 0;
         const c0 = pts.reduce((a, q) => [a[0] + q[0] / pts.length, a[1] + q[1] / pts.length], [0, 0]);
@@ -1373,6 +1407,24 @@ async function scaleStudy() {
   const footA = projA(floors);
   const gfa = floors.reduce((a, f) => a + f.area, 0);
   // A7 지하층 판정(시행령 119조): 지하층 둘레 지표면의 가중평균 − 지하층 바닥 ≥ 층고/2
+  // A9·A10 주차: 필요 대수 = 시설면적(주차장 제외) ÷ 기준, 0.5 이상 올림. 지하층에 16m 모듈로 수용 검토
+  let pInfo = '';
+  const basis = parseFloat($('zParkBasis').value);
+  if (basis > 0 && floors.length) {
+    const A1 = pArea(foot), PM = S.parkModule;
+    const Lb = PM && PM.ok ? PM.L : A1 / 16;
+    let n = Math.round(gfa / basis), parkA = 0;
+    for (let it = 0; it < 10; it++) {
+      const rows = Math.ceil(n / 2), lenP = rows * 2.5 + 1.0; // 장애인 1면 폭 +1.0m
+      parkA = Math.min(A1, 16 * lenP);
+      const nn = Math.round((gfa + (A1 - parkA)) / basis);
+      if (nn === n) break; n = nn;
+    }
+    const cap = 2 * Math.floor((Lb - 1.0) / 2.5);
+    const fits = PM ? PM.ok && cap >= n : null;
+    pInfo = `<tr><td>주차</td><td>필요 <b>${n}대</b> <span class="dim">(시설면적 ${(gfa + (A1 - parkA)).toFixed(0)}㎡ ÷ ${basis})</span>` +
+      (PM ? (PM.ok ? `<br>지하 모듈 16 × ${PM.L.toFixed(1)}m → 최대 ${cap}대 <b class="${fits ? 'ok' : 'warn'}">${fits ? '수용' : '부족'}</b> · 주차구역 약 ${parkA.toFixed(0)}㎡` : '<br><b class="warn">건축가능 폭이 16m보다 좁아 양측 주차 모듈 불가</b>') : '') + '</td></tr>';
+  }
   let bInfo = '';
   if ($('zBase').checked && floors.length) {
     const bfl = floors[0].plate.length ? cleanPaths(uni(floors.map((f) => f.plate).flat())) : [];
@@ -1401,6 +1453,7 @@ async function scaleStudy() {
       <tr><td>규모 결정</td><td><b>${govern}</b></td></tr>
       ${P ? `<tr><td>관통 동선</td><td>${P.label}</td></tr>` : ''}
       ${bInfo}
+      ${pInfo}
       ${notes.length ? `<tr><td>건축선</td><td>${notes.join('<br>')}</td></tr>` : ''}
     </table>
     <span class="dim">${uniform ? '전층 외벽 일치 · ' : ''}층고 ${fh}m · 높이 기준면 +${G0.toFixed(1)}m(경계 평균 지반) · 건축면적 = 전 층 수평투영 · 건폐율 초과분은 외곽을 균일하게 줄여 맞춤 · 최상층은 남은 용적률만큼 축소</span>`;
@@ -1717,7 +1770,7 @@ async function exportProject() {
     origin: S.origin, floorHeight: S.floorH, radius: S.radius, demo: S.demo,
     zone: S.zone || null, zoneInfo: $('zoneInfo').innerText,
     terrain: grid ? { base: T.base, grid } : null,
-    roadLines: S.roadLines || [], roadNames: S.roadNames || {},
+    roadLines: S.roadLines || [], roadNames: S.roadNames || {}, roadLimits: S.roadLimits || {},
     site: S.siteParcels.map((p) => ({ id: p.id, jibun: p.jibun, ring: ringOut(p.ring), ground: r2(p.ground), pnu: p.props.pnu })),
     parcels: S.parcels.map((p) => ({ id: p.id, ring: ringOut(p.ring), ground: r2(p.ground), pnu: p.props.pnu, jibun: p.props.jibun, zoneName: p.zoneName })),
     buildings: S.buildings.map((b) => ({ id: b.id, ring: ringOut(b.ring), floors: b.floors, height: r2(b.height), heightSrc: b.heightSrc, ground: r2(b.ground), onSite: !!b.onSite,
@@ -1732,6 +1785,7 @@ function loadProject(text) {
   S.buildings = d.buildings;
   S.roadLines = d.roadLines || [];
   S.roadNames = d.roadNames || {};
+  S.roadLimits = d.roadLimits || {};
   T.tiles = {}; T.grid = null; T.ready = false;
   if (d.terrain && d.terrain.grid) { T.grid = { ...d.terrain.grid, data: Float32Array.from(d.terrain.grid.data) }; T.base = d.terrain.base; T.ready = true; }
   S.zone = d.zone || null;
