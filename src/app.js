@@ -924,7 +924,7 @@ function siteExteriorEdges() {
         const m = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2];
         if (S.siteParcels.some((q) => pip([m[0] + nx * 0.6, m[1] + ny * 0.6], q.ring))) continue;
         const hit = S.parcels.find((q) => pip([m[0] + nx * 1.5, m[1] + ny * 1.5], q.ring));
-        edges.push({ a: p0, b: p1, nx, ny, road: !!linearKind(hit) });
+        edges.push({ a: p0, b: p1, nx, ny, road: !!linearKind(hit), kind: linearKind(hit) });
       }
     });
   });
@@ -1209,6 +1209,15 @@ function offs(paths, d, open) {
 const pArea = (paths) => paths.reduce((a, q) => a + ClipperLib.Clipper.Area(q), 0) / (CS * CS);
 function cleanPaths(paths) { return ClipperLib.Clipper.CleanPolygons(paths, 0.05 * CS).filter((q) => Math.abs(ClipperLib.Clipper.Area(q)) > 0.5 * CS * CS); }
 // 원하는 면적 이하가 되도록 균일하게 안으로 줄이기
+// 매스 바닥판 정리: 폭 4m 미만 조각을 없애고(열기 연산) 가장 큰 덩어리 하나만 남김
+function solid(paths, minW = 4) {
+  const op = cleanPaths(offs(offs(paths, -minW / 2), minW / 2));
+  const outs = op.filter((q) => ClipperLib.Clipper.Area(q) > 0);
+  if (!outs.length) return paths;
+  const big = outs.reduce((m, q) => (Math.abs(ClipperLib.Clipper.Area(q)) > Math.abs(ClipperLib.Clipper.Area(m)) ? q : m));
+  const holes = op.filter((q) => ClipperLib.Clipper.Area(q) < 0);
+  return cleanPaths(inter([big, ...holes], paths));
+}
 function shrinkTo(paths, target) {
   if (pArea(paths) <= target) return paths;
   let lo = 0, hi = 30, best = [];
@@ -1293,7 +1302,8 @@ async function scaleStudy() {
   let buildable = site;
   const bands = [];
   edges.forEach((e) => {
-    let d = (e.road ? sbRoad : sbNb) + (e.widen || 0);
+    // 도로측 후퇴·대지 안의 공지(건축선 기준)는 도로에만. 철도·구거는 인접대지 이격 적용
+    let d = (e.kind === '도로' ? sbRoad : sbNb) + (e.widen || 0);
     if (e.road) { const r = roadOf([(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2]); const lim = r && S.roadLimits && S.roadLimits[r.key]; if (lim) { d = Math.max(d, lim + (e.widen || 0)); e.limit = lim; } }
     if (d > 0) bands.push(...offs([toP([e.a, e.b])], d, true));
   });
@@ -1352,7 +1362,7 @@ async function scaleStudy() {
   const limit = (paths, h) => { const r = sunRegion(h); return r ? cleanPaths(inter(paths, r)) : paths; };
   // 4~5) 층 쌓기: 1층 가능 영역에서 시작, 정북사선·최고높이·규칙(관통 동선) 반영, 용적률 한도까지.
   //      건축면적(전 층 수평투영) ≤ 건폐율이 되도록 외곽을 균일하게 줄이는 값을 이분탐색
-  const avail1 = limit(buildable, fh);
+  const avail1 = solid(limit(buildable, fh));
   const P = S.rule && S.rule.path;
   function cutPath(plate, k) {
     if (!P) return plate;
@@ -1367,7 +1377,7 @@ async function scaleStudy() {
     for (let k = 1; k <= 80; k++) {
       const top = k * fh;
       if (top > hMax + 1e-6) break;
-      let plate = cutPath(k === 1 ? foot : limit(foot, top), k);
+      let plate = cutPath(k === 1 ? foot : solid(limit(foot, top)), k);
       let a = pArea(plate);
       if (a < 10) { if (k === 1) continue; break; }
       const remain = farGFA - sum;
@@ -1391,7 +1401,7 @@ async function scaleStudy() {
     let best = null;
     for (let N = 1; N <= nMax; N++) {
       if (N * fh > hMax + 1e-6) break;
-      const av = limit(buildable, N * fh), avA = pArea(av);
+      const av = solid(limit(buildable, N * fh)), avA = pArea(av);
       if (avA < 10) break;
       const A = Math.min(avA, bcrA, farGFA / N), g = A * N;
       if (!best || g > best.g + 0.5 || (Math.abs(g - best.g) <= 0.5 && N > best.N)) best = { N, A, g, av };
@@ -1432,7 +1442,7 @@ async function scaleStudy() {
           const half = (c) => [toP([[ux * c + vx * B, uy * c + vy * B], [ux * c - vx * B, uy * c - vy * B], [ux * (c + B) - vx * B, uy * (c + B) - vy * B], [ux * (c + B) + vx * B, uy * (c + B) + vy * B]])];
           let lo = -B, hi = B, got = null;
           for (let it = 0; it < 40; it++) { const m = (lo + hi) / 2, r = cleanPaths(inter(best.av, half(m))); if (pArea(r) > best.A) lo = m; else { hi = m; got = r; } } // 한도를 넘지 않는 쪽
-          foot = got && pArea(got) > 0 ? got : shrinkTo(best.av, best.A);
+          foot = got && pArea(got) > 0 ? solid(got) : shrinkTo(best.av, best.A);
         } else foot = shrinkTo(best.av, best.A);
       } else foot = shrinkTo(best.av, best.A);
       for (let k = 1; k <= best.N; k++) { const pl = cutPath(foot, k); floors.push({ k, top: k * fh, plate: pl, area: pArea(pl), partial: false }); }
