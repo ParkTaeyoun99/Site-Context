@@ -196,8 +196,9 @@ async function loadVWorld() {
   // 대지 안의 기존 건물 표시
   S.buildings.forEach((b) => { b.onSite = S.siteParcels.some((sp) => pip(centroid(b.ring), sp.ring)); });
   log(`필지 ${S.parcels.length} · 건물 ${S.buildings.length} 불러옴` + (noFloor ? ` (층수 없는 건물 ${noFloor}개는 2층으로 가정)` : ''), 'ok');
-  if (bf[0]) log('건물 속성 키: ' + Object.keys(bf[0].properties).join(', '), 'dim');
+  T.ready = false;
   buildScene(true);
+  await sampleTerrain();
 }
 
 function loadDemo() {
@@ -220,34 +221,79 @@ function loadDemo() {
     const floors = 1 + Math.floor(rnd() * (gx > 40 ? 18 : 6));
     S.buildings.push({ id: 'b' + id++, ring: [[gx + 3, gy + 3], [gx + 23, gy + 3], [gx + 23, gy + 19], [gx + 3, gy + 19]], floors, height: floors * S.floorH, heightSrc: 'floors', ground, props: { 비고: '데모 가상 건물' } });
   }
+  T.ready = false;
   log('데모 데이터(가상)를 불러왔습니다. 실제 대지는 V-World 키로 불러오세요.', 'warn');
   buildScene(true);
 }
 function mulberry(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 
-// ---------- 지형 (참고용) ----------
-async function sampleTerrain() {
-  if (!S.origin) return;
-  const items = [...S.siteParcels, ...S.parcels];
-  log(`지반고 샘플링 중 (${items.length}개 필지)… 해상도 약 90m 참고값`, 'warn');
-  const pts = items.map((it) => unproject(...centroid(it.ring)));
-  const els = [];
-  for (let i = 0; i < pts.length; i += 100) {
-    const chunk = pts.slice(i, i + 100);
-    const url = `https://api.open-meteo.com/v1/elevation?latitude=${chunk.map((p) => p[1].toFixed(6)).join(',')}&longitude=${chunk.map((p) => p[0].toFixed(6)).join(',')}`;
-    try {
-      const d = await (await fetch(url)).json();
-      els.push(...d.elevation);
-    } catch (e) { log('지형 요청 실패: ' + e.message, 'err'); return; }
-  }
-  const base = Math.min(...S.siteParcels.map((_, i) => els[i]));
-  items.forEach((it, i) => { it.ground = +(els[i] - base).toFixed(2); });
-  S.buildings.forEach((b) => {
-    const c = centroid(b.ring);
-    const p = items.find((it) => pip(c, it.ring));
-    b.ground = p ? p.ground : 0;
+// ---------- 지형: AWS Terrain Tiles (terrarium, z15 ≈ 3.8m 픽셀, 공개 DEM 기반 참고값) ----------
+const TZ = 15;
+const T = { tiles: {}, base: 0, ready: false };
+function tileXY(lon, lat) {
+  const n = 2 ** TZ, r = (lat * Math.PI) / 180;
+  return [((lon + 180) / 360) * n, ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n];
+}
+async function fetchTile(tx, ty) {
+  const k = tx + '_' + ty;
+  if (T.tiles[k]) return;
+  const blob = await (await fetch(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${TZ}/${tx}/${ty}.png`)).blob();
+  const bm = await createImageBitmap(blob);
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d'); g.drawImage(bm, 0, 0);
+  const d = g.getImageData(0, 0, 256, 256).data;
+  const e = new Float32Array(256 * 256);
+  for (let i = 0; i < e.length; i++) e[i] = d[i * 4] * 256 + d[i * 4 + 1] + d[i * 4 + 2] / 256 - 32768;
+  T.tiles[k] = e;
+}
+function pixAbs(gx, gy) { // 전역 픽셀 좌표
+  const tx = Math.floor(gx / 256), ty = Math.floor(gy / 256);
+  const t = T.tiles[tx + '_' + ty];
+  if (!t) return null;
+  return t[(gy - ty * 256) * 256 + (gx - tx * 256)];
+}
+function elevAbsLL(lon, lat) {
+  const [x, y] = tileXY(lon, lat);
+  const px = x * 256 - 0.5, py = y * 256 - 0.5;
+  const x0 = Math.floor(px), y0 = Math.floor(py), fx = px - x0, fy = py - y0;
+  const a = pixAbs(x0, y0), b = pixAbs(x0 + 1, y0), c = pixAbs(x0, y0 + 1), d = pixAbs(x0 + 1, y0 + 1);
+  if ([a, b, c, d].some((v) => v === null)) return null;
+  return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+}
+// 로컬 좌표(m) → 대지 최저점 기준 상대 높이
+function elev(x, y) {
+  if (!T.ready) return 0;
+  const v = elevAbsLL(...unproject(x, y));
+  return v === null ? 0 : v - T.base;
+}
+function ringGroundMin(ring) { return Math.min(...densify(ring, 3).map(([x, y]) => elev(x, y))); }
+function ringGroundAvg(ring) { const pts = densify(ring, 3); pts.push(centroid(ring)); return pts.reduce((a, [x, y]) => a + elev(x, y), 0) / pts.length; }
+function densify(ring, step) {
+  const out = [];
+  ring.forEach((p, i) => {
+    const q = ring[(i + 1) % ring.length];
+    const n = Math.max(1, Math.ceil(Math.hypot(q[0] - p[0], q[1] - p[1]) / step));
+    for (let k = 0; k < n; k++) out.push([p[0] + ((q[0] - p[0]) * k) / n, p[1] + ((q[1] - p[1]) * k) / n]);
   });
-  log('지반고 반영 완료 (대지 최저점 = 0). 정확한 값은 필지를 클릭해 직접 수정하세요.', 'ok');
+  return out;
+}
+
+async function sampleTerrain(quiet) {
+  if (!S.origin || S.demo) return;
+  const R = S.radius + 30;
+  const [lonA, latA] = unproject(-R, -R), [lonB, latB] = unproject(R, R);
+  const [xa, yb] = tileXY(lonA, latA), [xb, ya] = tileXY(lonB, latB);
+  const jobs = [];
+  for (let tx = Math.floor(xa); tx <= Math.floor(xb); tx++) for (let ty = Math.floor(ya); ty <= Math.floor(yb); ty++) jobs.push(fetchTile(tx, ty));
+  if (!quiet) log(`지형 타일 ${jobs.length}장 불러오는 중…`);
+  try { await Promise.all(jobs); } catch (e) { log('지형 요청 실패: ' + e.message, 'err'); return; }
+  T.ready = true; T.base = 0;
+  // 기준 = 대지 필지 경계·중심 중 최저점
+  const siteMin = Math.min(...S.siteParcels.flatMap((p) => densify(p.ring, 3).concat([centroid(p.ring)]).map(([x, y]) => elev(x, y))));
+  T.base = siteMin;
+  [...S.siteParcels, ...S.parcels].forEach((p) => { p.ground = +ringGroundAvg(p.ring).toFixed(2); });
+  S.buildings.forEach((b) => { b.ground = +ringGroundMin(b.ring).toFixed(2); });
+  log(`지형 반영 완료 · 대지 최저점 해발 약 ${siteMin.toFixed(1)}m = 기준 0 (공개 DEM 참고값, 실측 아님)`, 'ok');
   buildScene(false);
 }
 
@@ -319,20 +365,88 @@ function heightColor(top) {
   return c;
 }
 
+function drapedFill(ring, off, mat) {
+  const r = polyArea(ring) < 0 ? ring.slice().reverse() : ring;
+  const g = new THREE.ShapeGeometry(shapeFrom(densify(r, 4)));
+  g.rotateX(-Math.PI / 2);
+  const pos = g.attributes.position;
+  for (let i = 0; i < pos.count; i++) pos.setY(i, elev(pos.getX(i), -pos.getZ(i)) + off);
+  g.computeVertexNormals();
+  return new THREE.Mesh(g, mat);
+}
+function drapedLine(ring, off, color) {
+  const pts = densify(ring, 2); pts.push(pts[0]);
+  return new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts.map(([x, y]) => new THREE.Vector3(x, elev(x, y) + off, -y))), new THREE.LineBasicMaterial({ color }));
+}
+function terrainMesh() {
+  const R = S.radius, step = 2, n = Math.round((2 * R) / step);
+  const g = new THREE.PlaneGeometry(2 * R, 2 * R, n, n);
+  g.rotateX(-Math.PI / 2);
+  const pos = g.attributes.position, cols = [];
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < pos.count; i++) { const h = elev(pos.getX(i), -pos.getZ(i)); pos.setY(i, h); lo = Math.min(lo, h); hi = Math.max(hi, h); }
+  const c = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) { const t = (pos.getY(i) - lo) / Math.max(1, hi - lo); c.setHSL(0.1, 0.22, 0.9 - 0.22 * t); cols.push(c.r, c.g, c.b); }
+  g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+  g.computeVertexNormals();
+  const m = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true }));
+  m.receiveShadow = true;
+  return { mesh: m, lo, hi };
+}
+// 등고선 (marching squares, 1m 간격 · 5m 주곡선)
+function contours(lo, hi) {
+  const R = S.radius, step = 2, n = Math.round((2 * R) / step);
+  const H = [];
+  for (let j = 0; j <= n; j++) { H.push([]); for (let i = 0; i <= n; i++) H[j].push(elev(-R + i * step, -R + j * step)); }
+  const minor = [], major = [];
+  for (let lv = Math.ceil(lo); lv <= Math.floor(hi); lv++) {
+    const out = lv % 5 === 0 ? major : minor;
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+      const v = [H[j][i], H[j][i + 1], H[j + 1][i + 1], H[j + 1][i]];
+      const P = [[-R + i * step, -R + j * step], [-R + (i + 1) * step, -R + j * step], [-R + (i + 1) * step, -R + (j + 1) * step], [-R + i * step, -R + (j + 1) * step]];
+      const cross = [];
+      for (let e = 0; e < 4; e++) {
+        const a = v[e], b = v[(e + 1) % 4];
+        if ((a < lv) !== (b < lv)) { const t = (lv - a) / (b - a); const A = P[e], B = P[(e + 1) % 4]; cross.push([A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t]); }
+      }
+      for (let k = 0; k + 1 < cross.length; k += 2) cross.slice(k, k + 2).forEach(([x, y]) => out.push(x, lv + 0.08, -y));
+    }
+  }
+  const mk = (arr, color, op) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); return new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity: op })); };
+  return [mk(minor, 0x8a7f6c, 0.35), mk(major, 0x5c513f, 0.8)];
+}
+
 function buildScene(resetCam) {
-  groupCtx.clear(); groupLines.clear(); S.sectionPts = []; $('section').innerHTML = '';
-  const parcelMat = new THREE.MeshLambertMaterial({ color: 0xe6e1d8 });
-  S.parcels.forEach((p) => {
-    const m = prism(p.ring, 0.05, p.ground - 0.05, parcelMat);
-    m.castShadow = false; m.userData = { kind: 'parcel', ref: p };
-    groupCtx.add(m); groupCtx.add(outline(p.ring, p.ground + 0.02, 0xbdb5a6));
-  });
-  const siteMat = new THREE.MeshLambertMaterial({ color: 0xd94f3d, transparent: true, opacity: 0.85 });
-  S.siteParcels.forEach((p) => {
-    const m = prism(p.ring, 0.3, p.ground - 0.05, siteMat);
-    m.castShadow = false; m.userData = { kind: 'site', ref: p };
-    groupCtx.add(m); groupCtx.add(outline(p.ring, p.ground + 0.3, 0x7a1d12));
-  });
+  groupCtx.clear(); groupLines.clear(); S.sectionPts = []; $('section').innerHTML = ''; S.groundMesh = null;
+  if (T.ready) {
+    const { mesh, lo, hi } = terrainMesh();
+    mesh.userData = { kind: 'ground' }; S.groundMesh = mesh;
+    groupCtx.add(mesh);
+    if ($('showContours').checked) contours(lo, hi).forEach((l) => groupCtx.add(l));
+    const pMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.01, depthWrite: false });
+    S.parcels.forEach((p) => {
+      const m = drapedFill(p.ring, 0.05, pMat); m.userData = { kind: 'parcel', ref: p };
+      groupCtx.add(m); groupCtx.add(drapedLine(p.ring, 0.12, 0xb0a794));
+    });
+    const sMat = new THREE.MeshLambertMaterial({ color: 0xd94f3d, transparent: true, opacity: 0.75, polygonOffset: true, polygonOffsetFactor: -2, depthWrite: false });
+    S.siteParcels.forEach((p) => {
+      const m = drapedFill(p.ring, 0.25, sMat); m.userData = { kind: 'site', ref: p };
+      groupCtx.add(m); groupCtx.add(drapedLine(p.ring, 0.3, 0x7a1d12));
+    });
+  } else {
+    const parcelMat = new THREE.MeshLambertMaterial({ color: 0xe6e1d8 });
+    S.parcels.forEach((p) => {
+      const m = prism(p.ring, 0.05, p.ground - 0.05, parcelMat);
+      m.castShadow = false; m.userData = { kind: 'parcel', ref: p };
+      groupCtx.add(m); groupCtx.add(outline(p.ring, p.ground + 0.02, 0xbdb5a6));
+    });
+    const siteMat = new THREE.MeshLambertMaterial({ color: 0xd94f3d, transparent: true, opacity: 0.85 });
+    S.siteParcels.forEach((p) => {
+      const m = prism(p.ring, 0.3, p.ground - 0.05, siteMat);
+      m.castShadow = false; m.userData = { kind: 'site', ref: p };
+      groupCtx.add(m); groupCtx.add(outline(p.ring, p.ground + 0.3, 0x7a1d12));
+    });
+  }
   S.buildings.forEach((b) => {
     const top = b.ground + b.height;
     const mat = new THREE.MeshLambertMaterial({ color: b.onSite ? 0x999999 : heightColor(top), transparent: b.onSite, opacity: b.onSite ? 0.35 : 1 });
@@ -341,8 +455,7 @@ function buildScene(resetCam) {
     b.mesh = m;
     groupCtx.add(m);
   });
-  // 방위 표시
-  const n = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(S.radius * 0.85, 0.5, -S.radius * 0.6), 30, 0x222222, 8, 5);
+  const n = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(S.radius * 0.85, (T.ready ? elev(S.radius * 0.85, S.radius * 0.6) : 0) + 3, -S.radius * 0.6), 30, 0x222222, 8, 5);
   groupCtx.add(n);
   if (S.mode === 'view') runViewAnalysis();
   updateStats();
@@ -355,7 +468,7 @@ function updateStats() {
   const others = S.parcels.map((p) => p.ground);
   $('stats').innerHTML = S.origin ? `
     <b>대지</b> ${S.siteParcels.length}필지 · 약 ${area.toFixed(0)}㎡${S.demo ? ' (데모)' : ''}<br>
-    <b>대지 지반고</b> ${Math.min(...gs).toFixed(1)} ~ ${Math.max(...gs).toFixed(1)} m<br>
+    <b>대지 지반고</b> ${Math.min(...gs).toFixed(1)} ~ ${Math.max(...gs).toFixed(1)} m${T.ready ? ` <span class="dim">(기준 0 = 해발 ${T.base.toFixed(1)}m)</span>` : ' <span class="dim">(지형 미반영)</span>'}<br>
     <b>주변 지반고</b> ${others.length ? Math.min(...others).toFixed(1) + ' ~ ' + Math.max(...others).toFixed(1) + ' m' : '-'}<br>
     <b>주변 건물</b> ${S.buildings.filter((b) => !b.onSite).length}동 · 최고 ${Math.max(0, ...S.buildings.map((b) => b.ground + b.height)).toFixed(0)} m` : '';
 }
@@ -367,8 +480,8 @@ function sitePoints() {
     const xs = p.ring.map((q) => q[0]), ys = p.ring.map((q) => q[1]);
     const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
     const step = Math.max(3, Math.min(x1 - x0, y1 - y0) / 4);
-    for (let x = x0 + step / 2; x < x1; x += step) for (let y = y0 + step / 2; y < y1; y += step) if (pip([x, y], p.ring)) pts.push(new THREE.Vector3(x, p.ground + 1, -y));
-    const c = centroid(p.ring); pts.push(new THREE.Vector3(c[0], p.ground + 1, -c[1]));
+    for (let x = x0 + step / 2; x < x1; x += step) for (let y = y0 + step / 2; y < y1; y += step) if (pip([x, y], p.ring)) pts.push(new THREE.Vector3(x, (T.ready ? elev(x, y) : p.ground) + 1, -y));
+    const c = centroid(p.ring); pts.push(new THREE.Vector3(c[0], (T.ready ? elev(c[0], c[1]) : p.ground) + 1, -c[1]));
   });
   return pts;
 }
@@ -376,7 +489,7 @@ function runViewAnalysis() {
   groupLines.clear();
   const targets = sitePoints();
   const ctx = S.buildings.filter((b) => !b.onSite);
-  const meshes = ctx.map((b) => b.mesh);
+  const meshes = ctx.map((b) => b.mesh).concat(S.groundMesh ? [S.groundMesh] : []);
   const showLines = $('showLines').checked;
   const results = [];
   ctx.forEach((b) => {
@@ -427,9 +540,9 @@ function onUp(e) {
   raycaster.setFromCamera(pointer, camera); raycaster.far = Infinity;
   const hits = raycaster.intersectObjects(groupCtx.children.filter((o) => o.userData.kind), false);
   if (!hits.length) return;
-  const h = hits[0];
-  if ($('sectionMode').checked) { addSectionPoint(h.point); return; }
-  select(h.object.userData);
+  if ($('sectionMode').checked) { addSectionPoint(hits[0].point); return; }
+  const h = hits.find((x) => x.object.userData.kind !== 'ground');
+  if (h) select(h.object.userData);
 }
 function select(ud) {
   selected = ud;
@@ -465,7 +578,9 @@ function addSectionPoint(p) {
 }
 function groundAt(pt) {
   const p = [...S.siteParcels, ...S.parcels].find((q) => pip(pt, q.ring));
-  return p ? { g: p.ground, site: S.siteParcels.includes(p) } : null;
+  const site = !!p && S.siteParcels.includes(p);
+  if (T.ready) return { g: elev(pt[0], pt[1]), site };
+  return p ? { g: p.ground, site } : null;
 }
 function drawSection() {
   const [a, b] = S.sectionPts;
@@ -566,6 +681,7 @@ function init() {
   $('btnLoad').onclick = () => loadVWorld().catch((e) => log(e.message, 'err'));
   $('btnDemo').onclick = loadDemo;
   $('btnTerrain').onclick = () => sampleTerrain();
+  $('showContours').onchange = () => S.origin && buildScene(false);
   $('floorH').onchange = (e) => {
     S.floorH = parseFloat(e.target.value) || 3.3;
     S.buildings.forEach((b) => { if (b.heightSrc !== 'data') b.height = b.floors * S.floorH; });

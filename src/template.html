@@ -47,7 +47,8 @@
     <label>주변 반경 <input id="radius" type="number" value="200"> m &nbsp; 층고 <input id="floorH" type="number" step="0.1" value="3.3"> m</label>
     <button id="btnLoad" class="primary">대지 불러오기</button>
     <button id="btnDemo">데모 보기</button>
-    <button id="btnTerrain">지반고 샘플링</button>
+    <button id="btnTerrain">지형 다시 받기</button>
+    <label><input id="showContours" type="checkbox" checked> 등고선 (1m · 5m 굵게)</label>
     <div id="log"></div>
 
     <h2>2. 대지 정보</h2>
@@ -79,7 +80,7 @@
     <button id="btnJson">프로젝트 (JSON)</button>
     <button id="btnPng">이미지 (PNG)</button>
     <label class="sub">프로젝트 불러오기 <input id="fileJson" type="file" accept=".json"></label>
-    <p class="sub">DXF: 단위 m, 원점 = 대지 중심. 레이어 SITE / PARCEL / BLDG(두께=높이) / BLDG_ROOF.<br>데이터: 국토교통부 V-World (연속지적도, 도로명주소 건물). 지반고 샘플링: Open-Meteo (약 90m 해상도, 참고용).</p>
+    <p class="sub">DXF: 단위 m, 원점 = 대지 중심. 레이어 SITE / PARCEL / BLDG(두께=높이) / BLDG_ROOF.<br>데이터: 국토교통부 V-World (연속지적도, 도로명주소 건물). 지형: AWS Terrain Tiles 공개 DEM (z15, 참고용 — 실측 아님, 건물 높이가 일부 섞일 수 있음).</p>
   </div>
   <div id="view"></div>
 </div>
