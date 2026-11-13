@@ -564,9 +564,11 @@ function drawRoads() {
     const g = new THREE.BufferGeometry().setFromPoints(pts);
     groupCtx.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x1f3b8f, size: 2.2, sizeAttenuation: true })));
     const mid = r.pts[Math.floor(r.pts.length / 2)];
-    const lab = textSprite(`${r.name} ${r.avg >= 0 ? '+' : ''}${r.avg.toFixed(1)}m`);
-    lab.position.set(mid.ox + mid.nx * 6, mid.roadG + 10, -(mid.oy + mid.ny * 6));
-    groupCtx.add(lab);
+    if ($('roadLabels').checked) { // 규칙 질문에서 A·B·C로 부르므로 이름만 작게
+      const lab = textSprite(r.name, '#1f3b8f'); lab.scale.multiplyScalar(0.45);
+      lab.position.set(mid.ox + mid.nx * 6, mid.roadG + 4, -(mid.oy + mid.ny * 6));
+      groupCtx.add(lab);
+    }
   });
   const all = S.roads.map((r) => r.avg);
   const diff = Math.max(...all) - Math.min(...all);
@@ -1568,6 +1570,7 @@ function init() {
   $('btnTerrain').onclick = () => sampleTerrain();
   $('showContours').onchange = () => S.origin && buildScene(false);
   $('hideSiteBldg').onchange = () => S.origin && buildScene(false);
+  $('roadLabels').onchange = () => S.origin && buildScene(false);
   $('secEx').onchange = () => S.sectionPts.length === 2 && drawSection();
   $('zSel').innerHTML = '<option value="">선택</option>' + Object.keys(ZONES).map((z) => `<option>${z}</option>`).join('');
   $('zSel').onchange = applyZoneDefaults;
