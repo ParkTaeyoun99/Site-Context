@@ -180,6 +180,14 @@ async function loadVWorld() {
   let pf = [], bf = [];
   try { pf = await getFeatures('LP_PA_CBND_BUBUN', box); } catch (e) { log('필지: ' + e.message, 'err'); }
   try { bf = await getFeatures('LT_C_SPBD', box); } catch (e) { log('건물: ' + e.message, 'err'); }
+  let rf = [];
+  try { rf = await getFeatures('LT_L_SPRD', box); } catch (e) { log('도로명: ' + e.message, 'warn'); }
+  S.roadLines = [];
+  rf.forEach((f) => {
+    const g = f.geometry; if (!g || !f.properties.rn) return;
+    const lines = g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : [];
+    lines.forEach((ln) => S.roadLines.push({ name: f.properties.rn, pts: ln.map(([x, y]) => project(x, y)).map(([x, y]) => [r2(x), r2(y)]) }));
+  });
   S.parcels = [];
   pf.filter((f) => !sitePnu.has(f.properties.pnu)).forEach((f, i) => outerRings(f.geometry).forEach((r, k) => {
     S.parcels.push({ id: 'p' + i + '_' + k, ring: cleanRing(r.map(([x, y]) => project(x, y))), ground: 0, props: f.properties });
@@ -538,7 +546,20 @@ function analyzeRoads() {
     const slope = best > 0 ? (Math.abs(far[0].roadG - far[1].roadG) / best) * 100 : 0;
     return { dir: bearingName(nx, ny), kind: g[0].kind, len, lo, hi, avg, slope, pts: g };
   }).sort((a, b) => b.len - a.len);
-  roads.forEach((r, i) => (r.name = String.fromCharCode(65 + i)));
+  // 이름: 도로명주소 도로구간(중심선) 중 접도 지점에 가장 가까운 도로명으로 투표, 없으면 방향·종류
+  const near = (x, y) => {
+    let best = null;
+    (S.roadLines || []).forEach((l) => { for (let i = 0; i + 1 < l.pts.length; i++) { const d = segDist([x, y], l.pts[i], l.pts[i + 1]); if (d < 20 && (!best || d < best.d)) best = { d, n: l.name }; } });
+    return best && best.n;
+  };
+  roads.forEach((r) => {
+    const votes = {};
+    if (r.kind === '도로') r.pts.forEach((q) => { const n = near(q.ox, q.oy); if (n) votes[n] = (votes[n] || 0) + q.len; });
+    const top = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+    r.name = top ? top[0] : `${r.dir}측 ${r.kind}`;
+  });
+  const seen = {};
+  roads.forEach((r) => { if (seen[r.name]) r.name += ' (' + r.dir + '측)'; seen[r.name] = 1; });
   return roads;
 }
 function textSprite(text, color = '#1f3b8f') {
@@ -573,8 +594,8 @@ function drawRoads() {
   const all = S.roads.map((r) => r.avg);
   const diff = Math.max(...all) - Math.min(...all);
   const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
-  box.innerHTML = S.roads.map((r) => `<b>${r.name}</b> ${r.dir}측 ${r.kind} · 접도 ${r.len.toFixed(0)}m · 평균 ${fmt(r.avg)}m (${fmt(r.lo)} ~ ${fmt(r.hi)}) · 경사 ${r.slope.toFixed(1)}%`).join('<br>') +
-    (S.roads.length > 1 ? `<br><b>도로 간 높이차 ${diff.toFixed(1)}m</b> (평균 기준) · 최대 ${(Math.max(...S.roads.map((r) => r.hi)) - Math.min(...S.roads.map((r) => r.lo))).toFixed(1)}m` : '') +
+  box.innerHTML = S.roads.map((r) => `<b>${r.name}</b> ${r.name.includes(r.kind) ? '' : r.dir + '측 ' + r.kind + ' '}· 접도 ${r.len.toFixed(0)}m · 평균 ${fmt(r.avg)}m (${fmt(r.lo)} ~ ${fmt(r.hi)}) · 경사 ${r.slope.toFixed(1)}%`).join('<br>') +
+    (S.roads.length > 1 ? `<br><b>접도 간 높이차 ${diff.toFixed(1)}m</b> (평균 기준) · 최대 ${(Math.max(...S.roads.map((r) => r.hi)) - Math.min(...S.roads.map((r) => r.lo))).toFixed(1)}m` : '') +
     `<br><span class="dim">기준 0 = 대지 최저점 (해발 ${T.base.toFixed(1)}m). 경계 밖 4m 지점의 지형 높이.</span>`;
 }
 
@@ -1319,8 +1340,8 @@ ${JSON.stringify(ruleSchemaForAI(), null, 1)}
 
 할 일:
 1. 문장이 어느 규칙 유형인지 고른다. 맞는 유형이 없으면 type을 null로 하고 unsupported_reason에 어떤 새 유형이 필요한지 한국어로 쓴다.
-2. 문장에서 분명히 알 수 있는 파라미터만 params에 채운다. 추측하지 않는다. 도로 이름은 A, B 같은 name 값을 쓴다.
-3. 설계 의도에 해당하는데 문장에 없는 파라미터는 questions로 묻는다. 대지 정보를 활용해 선택지를 구체적으로 만든다 (예: "B 북동측 도로 (+1.1m)"). 길의 정확한 위치처럼 도구가 여러 대안으로 펼쳐 보여줄 수 있는 것은 묻지 않는다. 질문은 최대 4개, 중요한 순서로.
+2. 문장에서 분명히 알 수 있는 파라미터만 params에 채운다. 추측하지 않는다. 길은 adjacent_linear_spaces의 name 값(도로명 등)을 그대로 쓴다.
+3. 설계 의도에 해당하는데 문장에 없는 파라미터는 questions로 묻는다. 대지 정보를 활용해 선택지를 구체적으로 만든다 (예: "와우산로32길 · 북동측 · 평균 +1.1m"). 길의 정확한 위치처럼 도구가 여러 대안으로 펼쳐 보여줄 수 있는 것은 묻지 않는다. 질문은 최대 4개, 중요한 순서로.
 4. understood에 규칙을 도구 입장에서 한 문장으로 다시 쓴다.
 
 JSON 하나만 답한다. 형식:
@@ -1534,6 +1555,7 @@ async function exportProject() {
     origin: S.origin, floorHeight: S.floorH, radius: S.radius, demo: S.demo,
     zone: S.zone || null, zoneInfo: $('zoneInfo').innerText,
     terrain: grid ? { base: T.base, grid } : null,
+    roadLines: S.roadLines || [],
     site: S.siteParcels.map((p) => ({ id: p.id, jibun: p.jibun, ring: ringOut(p.ring), ground: r2(p.ground), pnu: p.props.pnu })),
     parcels: S.parcels.map((p) => ({ id: p.id, ring: ringOut(p.ring), ground: r2(p.ground), pnu: p.props.pnu, jibun: p.props.jibun, zoneName: p.zoneName })),
     buildings: S.buildings.map((b) => ({ id: b.id, ring: ringOut(b.ring), floors: b.floors, height: r2(b.height), heightSrc: b.heightSrc, ground: r2(b.ground), onSite: !!b.onSite,
@@ -1546,6 +1568,7 @@ function loadProject(text) {
   S.siteParcels = d.site.map((p) => ({ ...p, props: { pnu: p.pnu, jibun: p.jibun } }));
   S.parcels = d.parcels.map((p) => { const q = { ...p, props: { pnu: p.pnu, jibun: p.jibun } }; if (p.zoneName === undefined) delete q.zoneName; return q; });
   S.buildings = d.buildings;
+  S.roadLines = d.roadLines || [];
   T.tiles = {}; T.grid = null; T.ready = false;
   if (d.terrain && d.terrain.grid) { T.grid = { ...d.terrain.grid, data: Float32Array.from(d.terrain.grid.data) }; T.base = d.terrain.base; T.ready = true; }
   S.zone = d.zone || null;
