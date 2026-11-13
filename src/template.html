@@ -110,6 +110,7 @@
     <h2>법규 볼륨 (2단계)</h2>
     <div id="zoneInfo" class="sub">대지를 불러오면 용도지역을 자동 조회해요.</div>
     <label>용도지역 <select id="zSel"></select></label>
+    <label>주용도 <select id="zUse"></select> <span class="sub">(주차·조경·공지 기준)</span></label>
     <label>건폐율 <input id="zBcr" type="number" value="60"> % &nbsp; 용적률 <input id="zFar" type="number" value="200"> %</label>
     <label>최고높이 <input id="zHmax" type="number" placeholder="없음"> m <span class="sub">(가로구역·지구단위계획)</span></label>
     <label>후퇴: 도로측 <input id="zSbRoad" type="number" step="0.5" value="0"> m · 인접대지 <input id="zSbNb" type="number" step="0.5" value="0.5"> m</label>
@@ -124,7 +125,8 @@
     <label><input id="zBase" type="checkbox" checked> 지하 1층 판정 (시행령 119조)</label>
     <label><input id="zHigh" type="checkbox" checked> 외벽 일치일 때 매스를 지반 높은 쪽에 배치 (지하층 유리)</label>
     <label><input id="zModule" type="checkbox"> 외벽 일치일 때 매스 폭을 지하주차 모듈에 맞춤 (5+6+5 = 16m)</label>
-    <label>주차 기준: 시설면적 <input id="zParkBasis" type="number" value="150" style="width:56px"> ㎡당 1대 <span class="sub">(비우면 계산 안 함)</span></label>
+    <label>주차 기준: 시설면적 <input id="zParkBasis" type="number" value="134" style="width:56px"> ㎡당 1대 <span class="sub">(주용도로 자동, 서울 조례 별표2)</span></label>
+    <label><input id="zOpenAuto" type="checkbox" checked> 대지 안의 공지 최소 거리 자동 적용 (서울 조례 별표4 확인 항목)</label>
     <button id="btnEnv" class="primary">규모검토 실행</button>
     <label><input id="massShow" type="checkbox" checked> 층별 매스 표시</label>
     <label><input id="envShow" type="checkbox"> 법정 최대 볼륨(사선 외피) 같이 보기</label>

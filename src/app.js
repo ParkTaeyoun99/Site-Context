@@ -1145,6 +1145,47 @@ function envOutlines() {
   return segs;
 }
 
+// ================= 법규 검토 (서울특별시 기준) =================
+// 주용도별 부설주차장 설치기준: 서울특별시 주차장 설치 및 관리 조례 별표 2 (시설면적 ㎡당 1대)
+const USES = {
+  '근린생활시설': { park: 134, open: false },
+  '문화 및 집회시설': { park: 100, open: true, setback3: true },
+  '판매시설': { park: 100, open: true, setback3: true },
+  '업무시설(일반)': { park: 100, open: true },
+  '업무시설(공공)': { park: 200, open: true },
+  '숙박시설': { park: 134, open: true, setback3: true },
+  '위락시설': { park: 67, open: true },
+  '의료시설': { park: 100, open: true },
+  '운동시설': { park: 100, open: true },
+  '종교시설': { park: 100, open: true, setback3: true },
+  '교육연구시설': { park: null, open: false },
+  '기타 (직접 입력)': { park: null, open: false },
+};
+function landscapeRate(siteA, gfaTotal, zone) {
+  // 서울특별시 건축 조례 제24조
+  if (siteA < 200) return { rate: 0, why: '대지 200㎡ 미만 — 조경 의무 없음' };
+  if (/녹지/.test(zone || '')) return { rate: /보전녹지/.test(zone) ? 0.3 : 0, why: /보전녹지/.test(zone) ? '보전녹지지역 30%' : '녹지지역 — 의무 제외' };
+  if (siteA < 300) return { rate: 0.05, why: '대지 200~300㎡ → 5%' };
+  if (gfaTotal >= 2000) return { rate: 0.15, why: '연면적 2,000㎡ 이상 → 15%' };
+  if (gfaTotal >= 1000) return { rate: 0.10, why: '연면적 1,000~2,000㎡ → 10%' };
+  return { rate: 0.05, why: '연면적 1,000㎡ 미만 → 5%' };
+}
+// 대지 안의 공지 — 서울 조례 별표 4 중 확인된 항목만 (나머지는 입력값)
+function openSpaceSetbacks(use, gfaUse, zone) {
+  const u = USES[use] || {};
+  const out = { road: 0, nb: 0, why: [] };
+  if (u.setback3 && gfaUse >= 1000) { out.road = 3; out.why.push('해당 용도 1,000㎡ 이상 → 건축선에서 3m'); }
+  if (/전용주거/.test(zone || '')) { out.nb = 1; out.why.push('전용주거지역 → 인접대지에서 1m'); }
+  return out;
+}
+function publicSpace(use, gfaUse, zone) {
+  // 건축법 시행령 제27조의2: 일반주거·준주거·상업·준공업지역, 해당 용도 바닥면적 합계 5,000㎡ 이상
+  const zoneOk = /일반주거|준주거|상업|준공업/.test(zone || '');
+  const u = USES[use] || {};
+  if (!zoneOk || !u.open || gfaUse < 5000) return null;
+  return { rate: 0.10 }; // 서울: 대지면적의 10%
+}
+
 // ================= 규모검토 (층별 바닥판) =================
 const CS = 100; // Clipper 정수 좌표 배율 (cm)
 const toP = (ring) => ring.map(([x, y]) => ({ X: Math.round(x * CS), Y: Math.round(y * CS) }));
@@ -1223,7 +1264,9 @@ async function scaleStudy() {
   if (!S.siteParcels.length) return;
   const bcr = parseFloat($('zBcr').value) || 0, far = parseFloat($('zFar').value) || 0;
   const hIn = parseFloat($('zHmax').value), hMax = hIn > 0 ? hIn : Infinity;
-  const sbRoad = parseFloat($('zSbRoad').value) || 0, sbNb = parseFloat($('zSbNb').value) || 0;
+  const use = $('zUse').value, zoneNow = $('zSel').value || S.zone || '';
+  const osb = $('zOpenAuto').checked ? openSpaceSetbacks(use, (parseFloat($('zFar').value) || 0) / 100 * S.siteParcels.reduce((a, p) => a + Math.abs(polyArea(p.ring)), 0), zoneNow) : { road: 0, nb: 0, why: [] };
+  const sbRoad = Math.max(parseFloat($('zSbRoad').value) || 0, osb.road), sbNb = Math.max(parseFloat($('zSbNb').value) || 0, osb.nb);
   const sun = $('zSun').checked, sunRoad = $('zSunRoad').checked, sunNew = $('zSunRule').value === 'new';
   const sunD = Math.max(1.5, parseFloat($('zSunD').value) || 1.5), sunD2 = Math.max(5, parseFloat($('zSunD2').value) || 5);
   const fh = S.floorH;
@@ -1408,6 +1451,21 @@ async function scaleStudy() {
   const gfa = floors.reduce((a, f) => a + f.area, 0);
   // A7 지하층 판정(시행령 119조): 지하층 둘레 지표면의 가중평균 − 지하층 바닥 ≥ 층고/2
   // A9·A10 주차: 필요 대수 = 시설면적(주차장 제외) ÷ 기준, 0.5 이상 올림. 지하층에 16m 모듈로 수용 검토
+  // 조경·공개공지·대지 안의 공지·BF 경사로
+  let lawRows = '';
+  {
+    const groundA = Math.max(0, area - footA);
+    const ls = landscapeRate(area, gfa, zoneNow), need = area * ls.rate;
+    lawRows += `<tr><td>조경</td><td>${ls.rate ? `<b>${need.toFixed(1)}㎡</b> 이상 <span class="dim">(${ls.why})</span><br>지상 빈 땅 ${groundA.toFixed(0)}㎡ <b class="${groundA >= need ? 'ok' : 'warn'}">${groundA >= need ? '확보 가능' : '부족 — 옥상조경 등 필요'}</b>` : `<span class="dim">${ls.why}</span>`}</td></tr>`;
+    const ps = publicSpace(use, gfa, zoneNow);
+    lawRows += `<tr><td>공개공지</td><td>${ps ? `<b>${(area * ps.rate).toFixed(1)}㎡</b> 이상 <span class="dim">(대지 10%, 확보 시 용적률 최대 ×(1+공개공지/대지) 완화)</span>` : '<span class="dim">대상 아님 (지역·용도·5,000㎡ 기준)</span>'}</td></tr>`;
+    if (osb.why.length) lawRows += `<tr><td>대지 안의 공지</td><td>${osb.why.join('<br>')}</td></tr>`;
+    if (P) {
+      const rise = Math.abs(P.ze - P.zs), nL = Math.max(0, Math.ceil(rise / 0.75 - 1e-9) - 1), runL = P.L - nL * 1.5;
+      const sl = runL > 0 ? (rise / runL) * 100 : Infinity, ok = sl <= 100 / 12 + 1e-6 && P.w >= 1.2;
+      lawRows += `<tr><td>BF 경사로</td><td>높이차 ${rise.toFixed(2)}m → 참 <b>${nL}개</b> (0.75m마다, 1.5m) · 참 제외 경사 ${sl.toFixed(1)}% (1/${(100 / sl).toFixed(1)}) <b class="${ok ? 'ok' : 'warn'}">${ok ? '1/12 이하 적합' : '1/12 초과 — 길이 부족'}</b>${sl <= 100 / 18 ? ' · 1/18 이하 (BF 최우수 수준)' : ''}</td></tr>`;
+    }
+  }
   let pInfo = '';
   const basis = parseFloat($('zParkBasis').value);
   if (basis > 0 && floors.length) {
@@ -1422,7 +1480,8 @@ async function scaleStudy() {
     }
     const cap = 2 * Math.floor((Lb - 1.0) / 2.5);
     const fits = PM ? PM.ok && cap >= n : null;
-    pInfo = `<tr><td>주차</td><td>필요 <b>${n}대</b> <span class="dim">(시설면적 ${(gfa + (A1 - parkA)).toFixed(0)}㎡ ÷ ${basis})</span>` +
+    const hc = n >= 10 ? Math.ceil(n * 0.03) : 0; // 장애인전용주차구역: 부설주차장 3% 이상, 10대 미만 제외, 끝수 올림
+    pInfo = `<tr><td>주차</td><td>필요 <b>${n}대</b> <span class="dim">(시설면적 ${(gfa + (A1 - parkA)).toFixed(0)}㎡ ÷ ${basis})</span>` + (hc ? `<br>장애인전용 <b>${hc}대</b> 이상 (3.3 × 5.0m)` : n ? '<br><span class="dim">10대 미만 → 장애인전용 의무 없음</span>' : '') +
       (PM ? (PM.ok ? `<br>지하 모듈 16 × ${PM.L.toFixed(1)}m → 최대 ${cap}대 <b class="${fits ? 'ok' : 'warn'}">${fits ? '수용' : '부족'}</b> · 주차구역 약 ${parkA.toFixed(0)}㎡` : '<br><b class="warn">건축가능 폭이 16m보다 좁아 양측 주차 모듈 불가</b>') : '') + '</td></tr>';
   }
   let bInfo = '';
@@ -1454,6 +1513,7 @@ async function scaleStudy() {
       ${P ? `<tr><td>관통 동선</td><td>${P.label}</td></tr>` : ''}
       ${bInfo}
       ${pInfo}
+      ${lawRows}
       ${notes.length ? `<tr><td>건축선</td><td>${notes.join('<br>')}</td></tr>` : ''}
     </table>
     <span class="dim">${uniform ? '전층 외벽 일치 · ' : ''}층고 ${fh}m · 높이 기준면 +${G0.toFixed(1)}m(경계 평균 지반) · 건축면적 = 전 층 수평투영 · 건폐율 초과분은 외곽을 균일하게 줄여 맞춤 · 최상층은 남은 용적률만큼 축소</span>`;
@@ -1488,8 +1548,11 @@ function drawMass() {
   const P = S.rule && S.rule.path;
   if (P) {
     const pos = [];
-    const at = (t, side) => { const x = P.p[0] + P.ux * P.L * t + P.nx * side * P.w / 2, y = P.p[1] + P.uy * P.L * t + P.ny * side * P.w / 2; return [x, P.zs + (P.ze - P.zs) * t + 0.12, -y]; };
-    for (let i = 0; i < 40; i++) { const t0 = i / 40, t1 = (i + 1) / 40; const a = at(t0, -1), b = at(t0, 1), c = at(t1, 1), d = at(t1, -1); pos.push(...a, ...b, ...c, ...a, ...c, ...d); }
+    // 0.75m 높이마다 1.5m 수평 참을 둔 경사 단면
+    const rise = P.ze - P.zs, nL = Math.max(0, Math.ceil(Math.abs(rise) / 0.75 - 1e-9) - 1), runL = Math.max(0.1, P.L - nL * 1.5), seg = runL / (nL + 1);
+    const zAt = (t) => { let d = t * P.L, z = P.zs; for (let k = 0; k <= nL; k++) { const r = Math.min(d, seg); z += (rise / (nL + 1)) * (r / seg); d -= r; if (d <= 0) break; if (k < nL) d -= Math.min(d, 1.5); if (d <= 0) break; } return z; };
+    const at = (t, side) => { const x = P.p[0] + P.ux * P.L * t + P.nx * side * P.w / 2, y = P.p[1] + P.uy * P.L * t + P.ny * side * P.w / 2; return [x, zAt(t) + 0.12, -y]; };
+    for (let i = 0; i < 120; i++) { const t0 = i / 120, t1 = (i + 1) / 120; const a = at(t0, -1), b = at(t0, 1), c = at(t1, 1), d = at(t1, -1); pos.push(...a, ...b, ...c, ...a, ...c, ...d); }
     const rg = new THREE.BufferGeometry(); rg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); rg.computeVertexNormals();
     grp.add(new THREE.Mesh(rg, new THREE.MeshLambertMaterial({ color: 0xc0392b, side: THREE.DoubleSide })));
     const lb = textSprite(P.label, '#c0392b'); lb.scale.multiplyScalar(0.6);
@@ -1864,6 +1927,9 @@ function init() {
   $('secEx').onchange = () => S.sectionPts.length === 2 && drawSection();
   $('zSel').innerHTML = '<option value="">선택</option>' + Object.keys(ZONES).map((z) => `<option>${z}</option>`).join('');
   $('zSel').onchange = applyZoneDefaults;
+  $('zUse').innerHTML = Object.keys(USES).map((u) => `<option>${u}</option>`).join('');
+  $('zUse').onchange = () => { const b = USES[$('zUse').value].park; if (b) $('zParkBasis').value = b; };
+  $('zUse').onchange();
   $('btnEnv').onclick = async () => {
     try { $('massInfo').textContent = '계산 중…'; await scaleStudy(); if ($('envShow').checked) await buildEnvelope(); else { S.env = null; drawEnvelope(); $('envInfo').textContent = ''; } }
     catch (e) { $('massInfo').textContent = '오류: ' + e.message; console.error(e); }
