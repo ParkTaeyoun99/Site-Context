@@ -35,6 +35,10 @@
   .tbl tr.part td { color: #b9770e; }
   details summary { cursor: pointer; color: #666; }
   .studio-only { display: none; }
+  .card { border: 1px solid #e5e2dc; border-radius: 6px; padding: 6px 8px; margin-top: 6px; background: #fcfbf9; }
+  .card.q { background: #fff8ee; border-color: #f0d9b5; }
+  .card.alt { cursor: pointer; } .card.alt.on { border-color: #c0392b; background: #fdf0ee; }
+  .chip { display: inline-block; background: #eef2f7; border-radius: 10px; padding: 1px 8px; margin: 2px 2px 0 0; font-size: 11.5px; }
   body.studio .studio-only { display: block; }
   body.studio .collector-only { display: none; }
   #drop { border: 2px dashed #bbb; border-radius: 8px; padding: 16px; text-align: center; color: #666; margin-top: 6px; }
@@ -93,6 +97,15 @@
     <label><input id="envShow" type="checkbox"> 법정 최대 볼륨(사선 외피) 같이 보기</label>
     <div id="massInfo" class="sub" style="margin-top:6px"></div>
     <div id="envInfo" class="sub" style="margin-top:6px"></div>
+
+    <div class="studio-only">
+    <h2>3단계 · 프로젝트 규칙</h2>
+    <textarea id="ruleText" placeholder="예: 대지 한가운데 건물매스를 뚫는 슬로프를 만들어 중간에 꺾이는 길 없이 길을 이어준다."></textarea>
+    <button id="btnRule" class="primary">규칙 해석</button>
+    <div id="ruleBox" class="sub"></div>
+    <div id="altBox" class="sub"></div>
+    <div id="savedRules" class="sub"></div>
+    </div>
 
     <h2>3. 분석</h2>
     <button data-mode="height">높이 관계</button>

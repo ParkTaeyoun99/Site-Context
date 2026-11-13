@@ -476,6 +476,7 @@ function buildScene(resetCam) {
   drawRoads();
   S.envGroup = null; drawEnvelope();
   S.massGroup = null; drawMass();
+  S.altGroup = null; if (S.rule) drawAlts();
   if (S.mode === 'view') runViewAnalysis();
   updateStats();
   if (resetCam) { camera.position.set(S.radius * 1.1, S.radius * 1.3, S.radius * 1.3); controls.target.set(0, 0, 0); }
@@ -1156,29 +1157,49 @@ async function scaleStudy() {
     return [toP(pts)];
   }
   const limit = (paths, h) => { const r = sunRegion(h); return r ? cleanPaths(inter(paths, r)) : paths; };
-  // 4) 건축면적: 1층 가능 영역을 건폐율까지
+  // 4~5) 층 쌓기: 1층 가능 영역에서 시작, 정북사선·최고높이·규칙(관통 동선) 반영, 용적률 한도까지.
+  //      건축면적(전 층 수평투영) ≤ 건폐율이 되도록 외곽을 균일하게 줄이는 값을 이분탐색
   const avail1 = limit(buildable, fh);
-  const foot = shrinkTo(avail1, bcrA);
-  const footA = pArea(foot);
-  // 5) 층 쌓기: 정북사선·최고높이 안에서, 용적률 한도까지
-  const floors = [];
-  let gfa = 0;
-  for (let k = 1; k <= 80; k++) {
-    const top = k * fh;
-    if (top > hMax + 1e-6) break;
-    let plate = k === 1 ? foot : limit(foot, top);
-    let a = pArea(plate);
-    if (a < 10) break;
-    const remain = farGFA - gfa;
-    let partial = false;
-    if (a > remain) {
-      if (remain < Math.max(20, a * 0.15)) break;
-      plate = shrinkTo(plate, remain); a = pArea(plate); partial = true;
-    }
-    floors.push({ k, top, plate, area: a, partial });
-    gfa += a;
-    if (partial) break;
+  const P = S.rule && S.rule.path;
+  function cutPath(plate, k) {
+    if (!P) return plate;
+    if (P.cover === 'open') return cleanPaths(diff(plate, P.corridor));
+    const base = k === 1 ? -Infinity : G0 + (k - 1) * fh;
+    const hit = P.slices.filter((sl) => base < sl.zmax + P.clear);
+    return hit.length ? cleanPaths(diff(plate, hit.map((sl) => sl.poly))) : plate;
   }
+  function stack(foot) {
+    const out = [];
+    let sum = 0;
+    for (let k = 1; k <= 80; k++) {
+      const top = k * fh;
+      if (top > hMax + 1e-6) break;
+      let plate = cutPath(k === 1 ? foot : limit(foot, top), k);
+      let a = pArea(plate);
+      if (a < 10) { if (k === 1) continue; break; }
+      const remain = farGFA - sum;
+      let partial = false;
+      if (a > remain) {
+        if (remain < Math.max(20, a * 0.15)) break;
+        plate = shrinkTo(plate, remain); a = pArea(plate); partial = true;
+      }
+      out.push({ k, top, plate, area: a, partial });
+      sum += a;
+      if (partial) break;
+    }
+    return out;
+  }
+  const projA = (fl) => (fl.length ? pArea(cleanPaths(uni(fl.flatMap((f) => f.plate)))) : 0);
+  let foot = avail1, floors = stack(foot);
+  if (projA(floors) > bcrA) {
+    let lo = 0, hi = 30;
+    for (let it = 0; it < 18; it++) {
+      const m = (lo + hi) / 2, f = cleanPaths(offs(avail1, -m)), fl = stack(f);
+      if (projA(fl) > bcrA) lo = m; else { hi = m; foot = f; floors = fl; }
+    }
+  }
+  const footA = projA(floors);
+  const gfa = floors.reduce((a, f) => a + f.area, 0);
   S.mass = { G0, fh, floors, buildable, foot, site };
   drawMass();
   const maxH = floors.length ? floors[floors.length - 1].top : 0;
@@ -1195,8 +1216,9 @@ async function scaleStudy() {
       <tr><td>용적률</td><td><b>${((gfa / area) * 100).toFixed(2)}%</b> <span class="dim">/ ${far}%</span></td></tr>
       <tr><td>규모</td><td>지상 ${floors.length}층 · 높이 ${maxH.toFixed(1)}m</td></tr>
       <tr><td>규모 결정</td><td><b>${govern}</b></td></tr>
+      ${P ? `<tr><td>관통 동선</td><td>${P.label}</td></tr>` : ''}
     </table>
-    <span class="dim">층고 ${fh}m · 높이 기준면 +${G0.toFixed(1)}m(경계 평균 지반) · 건폐율 초과분은 외곽을 균일하게 줄여 맞춤 · 최상층은 남은 용적률만큼 축소</span>`;
+    <span class="dim">층고 ${fh}m · 높이 기준면 +${G0.toFixed(1)}m(경계 평균 지반) · 건축면적 = 전 층 수평투영 · 건폐율 초과분은 외곽을 균일하게 줄여 맞춤 · 최상층은 남은 용적률만큼 축소</span>`;
 }
 function drawMass() {
   if (S.massGroup) groupCtx.remove(S.massGroup);
@@ -1224,6 +1246,17 @@ function drawMass() {
     lab.position.set(c[0], topZ - M.fh / 2, -c[1]);
     grp.add(lab);
   });
+  // 관통 동선(슬로프) 표면
+  const P = S.rule && S.rule.path;
+  if (P) {
+    const pos = [];
+    const at = (t, side) => { const x = P.p[0] + P.ux * P.L * t + P.nx * side * P.w / 2, y = P.p[1] + P.uy * P.L * t + P.ny * side * P.w / 2; return [x, P.zs + (P.ze - P.zs) * t + 0.12, -y]; };
+    for (let i = 0; i < 40; i++) { const t0 = i / 40, t1 = (i + 1) / 40; const a = at(t0, -1), b = at(t0, 1), c = at(t1, 1), d = at(t1, -1); pos.push(...a, ...b, ...c, ...a, ...c, ...d); }
+    const rg = new THREE.BufferGeometry(); rg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); rg.computeVertexNormals();
+    grp.add(new THREE.Mesh(rg, new THREE.MeshLambertMaterial({ color: 0xc0392b, side: THREE.DoubleSide })));
+    const lb = textSprite(P.label, '#c0392b'); lb.scale.multiplyScalar(0.6);
+    const m = at(0.5, 0); lb.position.set(m[0], m[1] + 3, m[2]); grp.add(lb);
+  }
   // 건축 가능 영역(이격 반영) 바닥선
   M.buildable.forEach((q) => {
     const r = fromP(q); r.push(r[0]);
@@ -1232,6 +1265,196 @@ function drawMass() {
   });
   S.massGroup = grp;
   groupCtx.add(grp);
+}
+
+// ================= 3단계: 프로젝트 규칙 =================
+// 도구가 계산할 수 있는 규칙 유형 (새 유형은 여기에 추가)
+const RULE_TYPES = {
+  through_path: {
+    name: '관통 동선',
+    desc: '서로 다른 두 도로(또는 철도부지 등 선형 공간)를 대지를 가로지르는 꺾이지 않는 직선 길(슬로프/통로)로 잇는다. 길은 건물 매스를 뚫고 지나간다.',
+    params: {
+      from: { label: '시작하는 길', kind: 'road' },
+      to: { label: '끝나는 길', kind: 'road' },
+      width: { label: '길 폭', unit: 'm', default: 6, options: [4, 6, 8, 10] },
+      cover: { label: '뚫는 방식', default: 'covered', options: ['open', 'covered'], optionLabels: { open: '하늘로 열린 길 (매스를 둘로 가름)', covered: '매스 아래 통로 (위층은 길 위를 덮음)' } },
+      clear: { label: '통로 유효높이', unit: 'm', default: 4.5, options: [3.3, 4.5, 6.6], onlyIf: 'cover=covered' },
+      maxSlope: { label: '최대 경사', unit: '%', default: 8.33, options: [5.56, 8.33, 12.5], optionLabels: { 5.56: '1/18 (완만)', 8.33: '1/12 (무장애 기준)', 12.5: '1/8 (가파름)' } },
+      position: { label: '위치', default: 'center', options: ['center', 'gentle'], optionLabels: { center: '대지를 고르게 가르는 한가운데', gentle: '경사가 가장 완만한 곳' } },
+    },
+  },
+};
+S.rule = { text: '', type: null, params: {}, questions: [], alts: [], sel: -1, path: null };
+
+function siteSummaryForAI() {
+  const roads = (S.roads || []).map((r) => ({ name: r.name, side: r.dir + '측', kind: r.kind, frontage_m: +r.len.toFixed(0), avg_height_m: +r.avg.toFixed(1), range_m: [+r.lo.toFixed(1), +r.hi.toFixed(1)], slope_pct: +r.slope.toFixed(1) }));
+  const area = S.siteParcels.reduce((a, p) => a + Math.abs(polyArea(p.ring)), 0);
+  return { address: (S.project && S.project.address) || '', site_area_m2: Math.round(area), zone: S.zone || $('zSel').value || null,
+    bcr_pct: +$('zBcr').value, far_pct: +$('zFar').value, floor_height_m: S.floorH,
+    heights_note: '높이는 대지 최저점 기준(m)', adjacent_linear_spaces: roads };
+}
+function ruleSchemaForAI() {
+  return Object.fromEntries(Object.entries(RULE_TYPES).map(([k, t]) => [k, { name: t.name, description: t.desc,
+    params: Object.fromEntries(Object.entries(t.params).map(([pk, pv]) => [pk, { label: pv.label, unit: pv.unit, options: pv.kind === 'road' ? (S.roads || []).map((r) => r.name) : pv.options, option_labels: pv.optionLabels, default: pv.default, only_if: pv.onlyIf }])) }]));
+}
+async function interpretRule() {
+  const text = $('ruleText').value.trim();
+  if (!text) return;
+  if (!S.roads || !S.roads.length) { $('ruleBox').innerHTML = '<span class="err">먼저 프로젝트 파일을 불러오세요 (접도 분석이 필요해요).</span>'; return; }
+  const sample = window.claude && (await window.claude.use('sample'));
+  if (!sample) { $('ruleBox').innerHTML = '<span class="err">이 화면에서는 Claude를 쓸 수 없어요.</span>'; return; }
+  $('ruleBox').innerHTML = '<span class="dim">Claude가 규칙을 읽는 중… (처음엔 사용 허락 창이 떠요)</span>';
+  const prompt = `너는 건축 설계 도구의 "규칙 번역기"다. 설계자가 쓴 프로젝트 규칙 문장을, 도구가 계산할 수 있는 규칙 유형과 파라미터로 옮긴다.
+
+[대지 정보]
+${JSON.stringify(siteSummaryForAI(), null, 1)}
+
+[도구가 계산할 수 있는 규칙 유형]
+${JSON.stringify(ruleSchemaForAI(), null, 1)}
+
+[설계자의 규칙 문장]
+"${text}"
+
+할 일:
+1. 문장이 어느 규칙 유형인지 고른다. 맞는 유형이 없으면 type을 null로 하고 unsupported_reason에 어떤 새 유형이 필요한지 한국어로 쓴다.
+2. 문장에서 분명히 알 수 있는 파라미터만 params에 채운다. 추측하지 않는다. 도로 이름은 A, B 같은 name 값을 쓴다.
+3. 설계 의도에 해당하는데 문장에 없는 파라미터는 questions로 묻는다. 대지 정보를 활용해 선택지를 구체적으로 만든다 (예: "B 북동측 도로 (+1.1m)"). 길의 정확한 위치처럼 도구가 여러 대안으로 펼쳐 보여줄 수 있는 것은 묻지 않는다. 질문은 최대 4개, 중요한 순서로.
+4. understood에 규칙을 도구 입장에서 한 문장으로 다시 쓴다.
+
+JSON 하나만 답한다. 형식:
+{"type":"through_path","understood":"...","params":{"cover":"covered"},"questions":[{"param":"from","question":"...","options":[{"value":"A","label":"..."}],"why":"..."}],"unsupported_reason":null}`;
+  try {
+    const r = await sample.json(prompt, { modelTier: 'default' });
+    if (!r || typeof r !== 'object') throw { message: '해석 결과가 비었어요' };
+    S.rule = { text, type: r.type && RULE_TYPES[r.type] ? r.type : null, params: r.params || {}, questions: Array.isArray(r.questions) ? r.questions : [], understood: r.understood || '', unsupported: r.unsupported_reason, alts: [], sel: -1, path: null };
+    renderRule();
+  } catch (e) {
+    $('ruleBox').innerHTML = `<span class="err">${e.code === 'not_granted' ? 'Claude 사용이 허락되지 않았어요.' : e.code === 'rate_limited' ? '잠시 후 다시 시도해 주세요.' : '해석 실패: ' + (e.message || e.code)}</span>`;
+  }
+}
+function paramLabel(type, k, v) {
+  const d = RULE_TYPES[type].params[k];
+  if (d.kind === 'road') { const r = (S.roads || []).find((x) => x.name === v); return r ? `${r.name} ${r.dir}측 ${r.kind} (${r.avg >= 0 ? '+' : ''}${r.avg.toFixed(1)}m)` : v; }
+  return (d.optionLabels && d.optionLabels[v]) || `${v}${d.unit || ''}`;
+}
+function renderRule() {
+  const R = S.rule, box = $('ruleBox');
+  if (!R.type) { box.innerHTML = `<div class="card"><b>아직 계산할 수 없는 규칙이에요.</b><br>${R.unsupported || ''}<br><span class="dim">이런 규칙은 새 유형으로 추가해야 해요. Claude에게 이 문장을 전해 주세요.</span></div>`; return; }
+  const T = RULE_TYPES[R.type];
+  const open = R.questions.filter((q) => R.params[q.param] === undefined && T.params[q.param]);
+  let html = `<div class="card"><b>${T.name}</b> — ${R.understood}<br>`;
+  html += Object.entries(R.params).filter(([k]) => T.params[k]).map(([k, v]) => `<span class="chip">${T.params[k].label}: ${paramLabel(R.type, k, v)}</span>`).join(' ');
+  html += '</div>';
+  open.forEach((q, qi) => {
+    html += `<div class="card q"><b>${q.question}</b>${q.why ? `<br><span class="dim">${q.why}</span>` : ''}<div>`;
+    (q.options || []).forEach((o, oi) => { html += `<button data-q="${qi}" data-o="${oi}">${o.label || o.value}</button>`; });
+    html += `<input data-qin="${qi}" placeholder="직접 입력" style="width:90px"></div></div>`;
+  });
+  if (!open.length) html += `<button id="btnAlts" class="primary">대안 생성</button>`;
+  box.innerHTML = html;
+  box.querySelectorAll('button[data-q]').forEach((b) => (b.onclick = () => { const q = open[+b.dataset.q]; R.params[q.param] = q.options[+b.dataset.o].value; renderRule(); }));
+  box.querySelectorAll('input[data-qin]').forEach((inp) => (inp.onchange = () => { const q = open[+inp.dataset.qin]; const v = inp.value.trim(); if (v) { R.params[q.param] = isNaN(+v) ? v : +v; renderRule(); } }));
+  const ba = $('btnAlts'); if (ba) ba.onclick = () => { genAlts(); };
+}
+function fullParams() {
+  const R = S.rule, T = RULE_TYPES[R.type], out = {};
+  Object.entries(T.params).forEach(([k, d]) => { out[k] = R.params[k] !== undefined ? R.params[k] : d.default; });
+  return out;
+}
+// 관통 동선 대안: 두 길의 접도점 쌍 중 직선이 대지를 지나고, 경사 한도 안이며, 위치 기준 점수가 높은 것
+function genAlts() {
+  const prm = fullParams();
+  const rf = S.roads.find((r) => r.name === prm.from), rt = S.roads.find((r) => r.name === prm.to);
+  if (!rf || !rt || rf === rt) { $('altBox').innerHTML = '<span class="err">서로 다른 두 길을 골라야 해요.</span>'; return; }
+  const site = cleanPaths(offs(offs(uni(S.siteParcels.map((p) => toP(p.ring))), 0.05), -0.05));
+  const siteA = pArea(site);
+  const inSite = (x, y) => S.siteParcels.some((q) => pip([x, y], q.ring));
+  const w = +prm.width, maxS = +prm.maxSlope;
+  const cands = [];
+  rf.pts.forEach((a) => rt.pts.forEach((b) => {
+    const L = Math.hypot(b.x - a.x, b.y - a.y);
+    if (L < 10) return;
+    const slope = (Math.abs(b.roadG - a.roadG) / L) * 100;
+    if (slope > maxS) return;
+    const ux = (b.x - a.x) / L, uy = (b.y - a.y) / L, nx = -uy, ny = ux;
+    let ok = 0, tot = 0;
+    for (let t = 0.04; t < 0.96; t += 1 / L) for (const sd of [-0.5, 0, 0.5]) {
+      tot++; if (inSite(a.x + ux * L * t + nx * sd * w, a.y + uy * L * t + ny * sd * w)) ok++;
+    }
+    if (ok / tot < 0.9) return;
+    const half = [toP([[a.x - ux * 1e3, a.y - uy * 1e3], [b.x + ux * 1e3, b.y + uy * 1e3], [b.x + ux * 1e3 + nx * 1e3, b.y + uy * 1e3 + ny * 1e3], [a.x - ux * 1e3 + nx * 1e3, a.y - uy * 1e3 + ny * 1e3]])];
+    const a1 = pArea(inter(site, half)), bal = Math.min(a1, siteA - a1) / Math.max(a1, siteA - a1);
+    const score = prm.position === 'gentle' ? 1 - slope / maxS + 0.2 * bal : bal - 0.3 * (slope / maxS);
+    cands.push({ a, b, L, slope, bal, score, ux, uy, nx, ny });
+  }));
+  cands.sort((x, y) => y.score - x.score);
+  const alts = [];
+  for (const c of cands) {
+    if (alts.some((o) => Math.hypot(o.a.x - c.a.x, o.a.y - c.a.y) < 8 && Math.hypot(o.b.x - c.b.x, o.b.y - c.b.y) < 8)) continue;
+    alts.push(c); if (alts.length >= 4) break;
+  }
+  S.rule.alts = alts; S.rule.sel = -1; S.rule.path = null;
+  if (!alts.length) { $('altBox').innerHTML = `<div class="card"><b>조건을 만족하는 직선이 없어요.</b><br>최대 경사(${maxS}%)를 완화하거나 다른 두 길을 골라 보세요.</div>`; drawAlts(); return; }
+  renderAlts(); drawAlts();
+}
+function renderAlts() {
+  const R = S.rule;
+  $('altBox').innerHTML = '<b>대안</b> <span class="dim">(고르면 규모검토가 다시 돼요)</span>' + R.alts.map((c, i) => `
+    <div class="card alt${R.sel === i ? ' on' : ''}" data-i="${i}"><b>${'①②③④'[i]}</b> 길이 ${c.L.toFixed(0)}m · 경사 ${c.slope.toFixed(1)}% (1/${(100 / Math.max(c.slope, 0.01)).toFixed(0)}) · ${(c.a.roadG >= 0 ? '+' : '') + c.a.roadG.toFixed(1)} → ${(c.b.roadG >= 0 ? '+' : '') + c.b.roadG.toFixed(1)}m · 대지 분할 ${(c.bal * 100).toFixed(0)}%</div>`).join('') +
+    (R.sel >= 0 ? '<button id="btnSaveRule">이 규칙과 대안 저장</button>' : '');
+  $('altBox').querySelectorAll('.alt').forEach((el) => (el.onclick = () => selectAlt(+el.dataset.i)));
+  const sb = $('btnSaveRule'); if (sb) sb.onclick = saveRule;
+}
+async function selectAlt(i) {
+  const R = S.rule, c = R.alts[i], prm = fullParams();
+  R.sel = i;
+  const ext = 3, w = +prm.width;
+  const A = [c.a.x - c.ux * ext, c.a.y - c.uy * ext], B = [c.b.x + c.ux * ext, c.b.y + c.uy * ext];
+  const rect = (p0, p1) => [toP([[p0[0] + c.nx * w / 2, p0[1] + c.ny * w / 2], [p1[0] + c.nx * w / 2, p1[1] + c.ny * w / 2], [p1[0] - c.nx * w / 2, p1[1] - c.ny * w / 2], [p0[0] - c.nx * w / 2, p0[1] - c.ny * w / 2]])];
+  const n = Math.ceil(c.L / 2), slices = [];
+  for (let k = 0; k < n; k++) {
+    const t0 = k / n, t1 = (k + 1) / n;
+    const p0 = [c.a.x + c.ux * c.L * t0, c.a.y + c.uy * c.L * t0], p1 = [c.a.x + c.ux * c.L * t1, c.a.y + c.uy * c.L * t1];
+    const q0 = k === 0 ? A : p0, q1 = k === n - 1 ? B : p1;
+    slices.push({ poly: rect(q0, q1)[0], zmax: Math.max(c.a.roadG + (c.b.roadG - c.a.roadG) * t0, c.a.roadG + (c.b.roadG - c.a.roadG) * t1) });
+  }
+  R.path = { p: [c.a.x, c.a.y], ux: c.ux, uy: c.uy, nx: c.nx, ny: c.ny, L: c.L, w, zs: c.a.roadG, ze: c.b.roadG, cover: prm.cover, clear: +prm.clear,
+    corridor: rect(A, B), slices, label: `${prm.from}→${prm.to} 슬로프 ${c.slope.toFixed(1)}% · L${c.L.toFixed(0)}m · 폭 ${w}m · ${prm.cover === 'open' ? '하늘로 열림' : '통로 h' + prm.clear + 'm'}` };
+  renderAlts(); drawAlts();
+  $('massInfo').textContent = '계산 중…';
+  try { await scaleStudy(); } catch (e) { $('massInfo').textContent = '오류: ' + e.message; }
+}
+function drawAlts() {
+  if (S.altGroup) groupCtx.remove(S.altGroup);
+  const R = S.rule; if (!R.alts.length) return;
+  const g = new THREE.Group();
+  R.alts.forEach((c, i) => {
+    const on = R.sel === i;
+    const pts = [new THREE.Vector3(c.a.x, c.a.roadG + 1, -c.a.y), new THREE.Vector3(c.b.x, c.b.roadG + 1, -c.b.y)];
+    g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: on ? 0xc0392b : 0x7f8c8d, depthTest: false, transparent: true, opacity: on ? 1 : 0.7 })));
+    const lb = textSprite('①②③④'[i], on ? '#c0392b' : '#555'); lb.scale.multiplyScalar(0.6);
+    lb.position.set(c.a.x, c.a.roadG + 4, -c.a.y); g.add(lb);
+  });
+  S.altGroup = g; groupCtx.add(g);
+}
+async function saveRule() {
+  const db = window.claude && (await window.claude.use('db'));
+  const R = S.rule, c = R.alts[R.sel];
+  const rec = { created: new Date().toISOString(), project: (S.project && S.project.address) || '', sentence: R.text, type: R.type, understood: R.understood,
+    params: fullParams(), chosen: c ? { from_xy: [r2(c.a.x), r2(c.a.y)], to_xy: [r2(c.b.x), r2(c.b.y)], length_m: r2(c.L), slope_pct: r2(c.slope), start_h: r2(c.a.roadG), end_h: r2(c.b.roadG) } : null,
+    result: S.mass ? { floors: S.mass.floors.length, gfa_m2: r2(S.mass.floors.reduce((a, f) => a + f.area, 0)) } : null };
+  if (!db) { log('저장소를 쓸 수 없어요 (로그인 확인).', 'err'); return; }
+  try { await db.collection('rules').doc('r' + Date.now()).set(rec); log('규칙을 저장했어요. Claude가 대화에서 읽을 수 있어요.', 'ok'); loadSavedRules(); }
+  catch (e) { log('저장 실패: ' + (e.message || e.code), 'err'); }
+}
+async function loadSavedRules() {
+  const db = window.claude && (await window.claude.use('db'));
+  if (!db) return;
+  try {
+    const snap = await db.collection('rules').orderBy('created', 'desc').limit(10).get();
+    const rows = (snap.docs || snap).map((d) => (d.data ? d.data() : d));
+    $('savedRules').innerHTML = rows.length ? '<b>저장된 규칙</b>' + rows.map((r) => `<div class="card dim">${(r.created || '').slice(0, 10)} · ${r.sentence}<br>${r.understood || ''}</div>`).join('') : '';
+  } catch (e) { /* 비어 있거나 권한 없음 */ }
 }
 
 // ---------- 내보내기 ----------
@@ -1328,6 +1551,7 @@ function loadProject(text) {
   $('zoneInfo').innerHTML = d.zoneInfo ? d.zoneInfo.replace(/\n/g, '<br>') : '용도지역 정보 없음 — 직접 고르세요.';
   $('floorH').value = S.floorH;
   S.project = { address: d.address || '', created: d.created || '' };
+  S.rule = { text: '', type: null, params: {}, questions: [], alts: [], sel: -1, path: null }; $('ruleBox').innerHTML = ''; $('altBox').innerHTML = '';
   log(`프로젝트 불러옴: ${d.address || ''}${T.ready ? '' : ' (지형 없음)'}`, 'ok');
   buildScene(true);
   if (window.__onProjectLoaded) window.__onProjectLoaded(d, text);
@@ -1366,12 +1590,17 @@ function init() {
   $('btnPng').onclick = () => renderer.domElement.toBlob((b) => b && saveFile('site-context.png', b));
   ['fileJson', 'fileJson2'].forEach((id) => { $(id).onchange = (e) => { const f = e.target.files[0]; if (f) f.text().then(loadProject).catch((er) => log('불러오기 실패: ' + er.message, 'err')); }; });
   setMode('height');
+  if (STUDIO) {
+    $('btnRule').onclick = () => interpretRule();
+    loadSavedRules();
+  }
   // 파일 끌어다 놓기
   const host = document.body;
   host.addEventListener('dragover', (e) => { e.preventDefault(); host.classList.add('drag'); });
   host.addEventListener('dragleave', () => host.classList.remove('drag'));
   host.addEventListener('drop', (e) => { e.preventDefault(); host.classList.remove('drag'); const f = e.dataTransfer.files[0]; if (f) f.text().then(loadProject).catch((er) => log('불러오기 실패: ' + er.message, 'err')); });
   window.__S = S; // 디버그용
+  window.__rules = { genAlts, selectAlt, renderRule, fullParams, exportProject };
   window.__app = { loadProject, scaleStudy, buildScene, saveFile, dxf, elev, analyzeRoads, siteExteriorEdges, ZONES, log, THREE, groupCtx: () => groupCtx, textSprite, pip, polyArea, centroid, densify, offs: null };
   window.__demo = loadDemo;
   window.__mode = setMode;
