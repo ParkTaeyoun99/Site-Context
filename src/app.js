@@ -837,8 +837,25 @@ function northHit(p, edges) {
   return best;
 }
 
-function buildEnvelope() {
+// 도로·철도·구거(또는 필지 없는 땅)를 지나 정북으로 처음 만나는 일반 대지의 경계
+function marchNorth(x, y0) {
+  const lim = S.radius;
+  const lotAt = (y) => { const q = S.parcels.find((pp) => pip([x, y], pp.ring)); return q && !linearKind(q) && !S.siteParcels.includes(q) ? q : null; };
+  let prev = y0;
+  for (let y = y0 + 0.5; y < lim; y += 0.5) {
+    const q = lotAt(y);
+    if (q) {
+      let lo = prev, hi = y;
+      for (let k = 0; k < 6; k++) { const m = (lo + hi) / 2; if (lotAt(m)) hi = m; else lo = m; }
+      return { y: hi, parcel: q };
+    }
+    prev = y;
+  }
+  return null;
+}
+async function buildEnvelope() {
   if (!S.siteParcels.length) return;
+  $('envInfo').textContent = '계산 중…';
   const cs = 0.5;
   const bcr = parseFloat($('zBcr').value) || 0, far = parseFloat($('zFar').value) || 0;
   const hIn = parseFloat($('zHmax').value); const hMax = hIn > 0 ? hIn : 30; // 미입력 시 표시 상한 30m
@@ -855,32 +872,60 @@ function buildEnvelope() {
   const nx = Math.ceil((Math.max(...xs) - X0) / cs), ny = Math.ceil((Math.max(...ys) - Y0) / cs);
   const cells = [];
   let sunLimited = 0, evaluated = 0;
+  // 1차: 셀마다 정북 기준선 찾기
+  const refCache = new Map();
+  const pending = [];
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
     const p = [X0 + (i + 0.5) * cs, Y0 + (j + 0.5) * cs];
     if (!S.siteParcels.some((q) => pip(p, q.ring))) continue;
     let ok = true;
     for (const e of edges) { const d = segDist(p, e.a, e.b); if (d < (e.road ? sbRoad : sbNb)) { ok = false; break; } }
     if (!ok) continue;
-    evaluated++;
-    let H = hMax;
+    let ref = null; // {y, parcel, via}
     if (sun) {
       const hit = northHit(p, edges);
-      if (hit && (!hit.e.road || sunRoad)) {
-        const Hs = hit.d < 1.5 ? 0 : Math.max(10, 2 * hit.d);
-        if (Hs < H) { H = Hs; sunLimited++; }
+      if (hit && !hit.e.road) ref = { y: p[1] + hit.d, parcel: S.parcels.find((q) => pip([p[0], p[1] + hit.d + 0.5], q.ring)) || null, via: 'direct' };
+      else if (hit && hit.e.road && sunRoad) {
+        const key = i + ':' + edges.indexOf(hit.e);
+        if (!refCache.has(key)) refCache.set(key, marchNorth(p[0], p[1] + hit.d + 0.05));
+        const r = refCache.get(key);
+        if (r) ref = { ...r, via: 'across' };
       }
     }
-    const g = elev(p[0], p[1]);
-    const top = G0 + H;
-    const floors = Math.max(0, Math.floor((top - g) / fh + 1e-6));
-    if (floors > 0) cells.push({ i, j, x: p[0], y: p[1], g, floors });
+    pending.push({ i, j, p, ref });
   }
+  // 정북 인접 대지의 용도지역 확인 (전용·일반주거가 아니면 제86조②3 적용 제외)
+  const refParcels = [...new Set(pending.map((c) => c.ref && c.ref.parcel).filter(Boolean))];
+  if (!S.demo) {
+    for (const rp of refParcels) {
+      if (rp.zoneName !== undefined) continue;
+      try { const ip = interiorPoint(rp.ring); const z = await vwPoint('LT_C_UQ111', ip[0], ip[1]); rp.zoneName = z.length ? z[0].uname : null; }
+      catch (e) { rp.zoneName = null; }
+    }
+  }
+  const resid = (z) => !z || /전용주거|일반주거/.test(z); // 모르면 적용(보수적)
+  const refPts = [];
+  for (const c of pending) {
+    evaluated++;
+    let H = hMax;
+    if (c.ref && resid(c.ref.parcel && c.ref.parcel.zoneName)) {
+      const d = c.ref.y - c.p[1];
+      const Hs = d < 1.5 ? 0 : Math.max(10, 2 * d);
+      if (Hs < H) { H = Hs; sunLimited++; }
+      refPts.push([c.p[0], c.ref.y]);
+    }
+    const g = elev(c.p[0], c.p[1]);
+    const floors = Math.max(0, Math.floor((G0 + H - g) / fh + 1e-6));
+    if (floors > 0) cells.push({ i: c.i, j: c.j, x: c.p[0], y: c.p[1], g, floors });
+  }
+  const refSummary = refParcels.map((rp) => `${(rp.props && rp.props.jibun) || '필지'}(${rp.zoneName || '용도 미확인'}${resid(rp.zoneName) ? '' : ' → 적용 제외'})`);
   const cellA = cs * cs;
   const envGFA = cells.reduce((a, c) => a + c.floors * cellA, 0);
   const envFoot = cells.length * cellA;
   const maxF = Math.max(0, ...cells.map((c) => c.floors));
   const farFloors = bcr > 0 ? far / bcr : 0; // 건폐율을 꽉 채웠을 때 필요한 층수
-  S.env = { cs, X0, Y0, nx, ny, cells, G0, fh, farFloors, edges };
+  const uniqRef = []; refPts.forEach((q) => { if (uniqRef.every((u) => Math.abs(u[0] - q[0]) > 0.4 || Math.abs(u[1] - q[1]) > 0.4)) uniqRef.push(q); });
+  S.env = { cs, X0, Y0, nx, ny, cells, G0, fh, farFloors, edges, refPts: uniqRef };
   drawEnvelope();
   const farGFA = (area * far) / 100, bcrA = (area * bcr) / 100;
   const govern = envGFA >= farGFA ? `용적률이 규모를 결정 (볼륨 안에 여유 ${(envGFA - farGFA).toFixed(0)}㎡)` : `사선·높이 볼륨이 규모를 결정 (용적률 ${((envGFA / area) * 100).toFixed(0)}%까지만 가능)`;
@@ -891,6 +936,7 @@ function buildEnvelope() {
     <b>볼륨이 담는 연면적</b> ${envGFA.toFixed(0)}㎡ · 최고 ${maxF}층<br>
     <b>→ ${govern}</b><br>
     건폐율을 꽉 채우면 평균 ${(farGFA / bcrA).toFixed(1)}개 층 · 정북일조로 낮아진 칸 ${((sunLimited / Math.max(1, evaluated)) * 100).toFixed(0)}%<br>
+    ${sun ? `정북 기준선: ${sunRoad ? '도로·철도 건너편 대지경계선 (시행령 86조⑥)' : '대지에 바로 맞닿은 인접대지만'}${refSummary.length ? '<br>기준 대지: ' + refSummary.slice(0, 6).join(', ') + (refSummary.length > 6 ? ` 외 ${refSummary.length - 6}` : '') : ''}<br>` : ''}
     ${hIn > 0 ? '' : '<span class="warn">최고높이 미입력 → 볼륨은 30m까지만 표시 (실제 제한 아님)</span><br>'}<span class="dim">0.5m 격자 근사 · 층고 ${fh}m · 지표면은 경계 평균으로 단순화 (고저차 3m 초과 시 구간별 산정은 미반영)</span>`;
 }
 function drawEnvelope() {
@@ -931,6 +977,14 @@ function drawEnvelope() {
     const e0 = E.edges[0];
     lab.position.set(e0.a[0], z + 4, -e0.a[1]);
     grp.add(lab);
+  }
+  if (E.refPts && E.refPts.length) {
+    const rp = E.refPts.map(([x, y]) => new THREE.Vector3(x, elev(x, y) + 0.4, -y));
+    grp.add(new THREE.Points(new THREE.BufferGeometry().setFromPoints(rp), new THREE.PointsMaterial({ color: 0xe67e22, size: 1.6 })));
+    const top = E.refPts.reduce((a, b) => (b[1] > a[1] ? b : a));
+    const lb = textSprite('정북 기준선', '#d35400');
+    lb.position.set(top[0], elev(top[0], top[1]) + 6, -top[1]);
+    grp.add(lb);
   }
   S.envGroup = grp;
   groupCtx.add(grp);
@@ -1044,7 +1098,7 @@ function init() {
   $('secEx').onchange = () => S.sectionPts.length === 2 && drawSection();
   $('zSel').innerHTML = '<option value="">선택</option>' + Object.keys(ZONES).map((z) => `<option>${z}</option>`).join('');
   $('zSel').onchange = applyZoneDefaults;
-  $('btnEnv').onclick = () => buildEnvelope();
+  $('btnEnv').onclick = () => buildEnvelope().catch((e) => { $('envInfo').textContent = '오류: ' + e.message; });
   $('envShow').onchange = () => drawEnvelope();
   $('secClose').onclick = () => { $('sectionBox').style.display = 'none'; };
   $('floorH').onchange = (e) => {
