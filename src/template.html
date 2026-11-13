@@ -24,7 +24,9 @@
   #stats, #info, #viewList { font-size: 12.5px; }
   .legend { height: 10px; border-radius: 3px; margin: 4px 0; }
   .sub { color: #888; font-size: 11.5px; }
-  #section { background: #fff; border: 1px solid #eee; border-radius: 4px; margin-top: 6px; }
+  #sectionBox { display: none; position: absolute; left: 12px; right: 12px; bottom: 12px; background: rgba(255,255,255,0.96); border: 1px solid #ccc; border-radius: 6px; padding: 8px 10px; box-shadow: 0 4px 16px rgba(0,0,0,.12); z-index: 5; }
+  #secClose { position: absolute; right: 8px; top: 4px; margin: 0; padding: 2px 8px; font-size: 12px; }
+  select { font: inherit; padding: 2px 4px; }
   details summary { cursor: pointer; color: #666; }
   @media (max-width: 760px) { #app { flex-direction: column; } #panel { width: 100%; height: 50%; border-right: 0; border-bottom: 1px solid #ddd; } }
 </style>
@@ -53,6 +55,10 @@
 
     <h2>2. 대지 정보</h2>
     <div id="stats" class="sub">아직 불러오지 않음</div>
+    <label><input id="hideSiteBldg" type="checkbox"> 대지 안 기존 건물 숨기기</label>
+
+    <h2>접도 분석</h2>
+    <div id="roadList" class="sub">지형을 불러오면 분석해요.</div>
 
     <h2>3. 분석</h2>
     <button data-mode="height">높이 관계</button>
@@ -69,8 +75,8 @@
     </div>
 
     <h2>4. 단면</h2>
-    <label><input id="sectionMode" type="checkbox"> 단면선 그리기 <span class="sub">(지도에서 두 점 클릭)</span></label>
-    <div id="section"></div>
+    <label><input id="sectionMode" type="checkbox"> 단면선 그리기 <span class="sub">(지도에서 두 점 클릭 → 아래에 크게 표시)</span></label>
+    <label>수직 과장 <select id="secEx"><option value="1">×1 (실제)</option><option value="2">×2</option><option value="3" selected>×3</option><option value="5">×5</option></select></label>
 
     <h2>5. 선택한 객체</h2>
     <div id="info" class="sub">필지나 건물을 클릭하면 지반고·층수를 고칠 수 있어요.</div>
@@ -82,7 +88,9 @@
     <label class="sub">프로젝트 불러오기 <input id="fileJson" type="file" accept=".json"></label>
     <p class="sub">DXF: 단위 m, 원점 = 대지 중심. 레이어 SITE / PARCEL / BLDG(두께=높이) / BLDG_ROOF.<br>데이터: 국토교통부 V-World (연속지적도, 도로명주소 건물). 지형: AWS Terrain Tiles 공개 DEM (z15, 참고용 — 실측 아님, 건물 높이가 일부 섞일 수 있음).</p>
   </div>
-  <div id="view"></div>
+  <div id="view">
+    <div id="sectionBox"><button id="secClose">닫기</button><div id="section"></div></div>
+  </div>
 </div>
 <script>/*APP*/</script>
 </body>

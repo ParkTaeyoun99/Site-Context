@@ -413,11 +413,11 @@ function contours(lo, hi) {
     }
   }
   const mk = (arr, color, op) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); return new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity: op })); };
-  return [mk(minor, 0x8a7f6c, 0.35), mk(major, 0x5c513f, 0.8)];
+  return [mk(minor, 0x7a6e58, 0.6), mk(major, 0x3d3426, 1)];
 }
 
 function buildScene(resetCam) {
-  groupCtx.clear(); groupLines.clear(); S.sectionPts = []; $('section').innerHTML = ''; S.groundMesh = null;
+  groupCtx.clear(); groupLines.clear(); S.sectionPts = []; $('section').innerHTML = ''; $('sectionBox').style.display = 'none'; S.groundMesh = null;
   if (T.ready) {
     const { mesh, lo, hi } = terrainMesh();
     mesh.userData = { kind: 'ground' }; S.groundMesh = mesh;
@@ -434,6 +434,9 @@ function buildScene(resetCam) {
       groupCtx.add(m); groupCtx.add(drapedLine(p.ring, 0.3, 0x7a1d12));
     });
   } else {
+    const gp = new THREE.Mesh(new THREE.PlaneGeometry(4 * S.radius, 4 * S.radius).rotateX(-Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0xf0ede7 }));
+    gp.position.y = -0.1; gp.receiveShadow = true; gp.userData = { kind: 'ground' };
+    groupCtx.add(gp);
     const parcelMat = new THREE.MeshLambertMaterial({ color: 0xe6e1d8 });
     S.parcels.forEach((p) => {
       const m = prism(p.ring, 0.05, p.ground - 0.05, parcelMat);
@@ -447,9 +450,11 @@ function buildScene(resetCam) {
       groupCtx.add(m); groupCtx.add(outline(p.ring, p.ground + 0.3, 0x7a1d12));
     });
   }
+  const hideSite = $('hideSiteBldg').checked;
   S.buildings.forEach((b) => {
+    if (b.onSite && hideSite) { b.mesh = null; return; }
     const top = b.ground + b.height;
-    const mat = new THREE.MeshLambertMaterial({ color: b.onSite ? 0x999999 : heightColor(top), transparent: b.onSite, opacity: b.onSite ? 0.35 : 1 });
+    const mat = new THREE.MeshLambertMaterial({ color: b.onSite ? 0x999999 : heightColor(top), transparent: !!b.onSite, opacity: b.onSite ? 0.35 : 1 });
     const m = prism(b.ring, b.height, b.ground, mat);
     m.userData = { kind: 'building', ref: b };
     b.mesh = m;
@@ -457,9 +462,97 @@ function buildScene(resetCam) {
   });
   const n = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(S.radius * 0.85, (T.ready ? elev(S.radius * 0.85, S.radius * 0.6) : 0) + 3, -S.radius * 0.6), 30, 0x222222, 8, 5);
   groupCtx.add(n);
+  drawRoads();
   if (S.mode === 'view') runViewAnalysis();
   updateStats();
   if (resetCam) { camera.position.set(S.radius * 1.1, S.radius * 1.3, S.radius * 1.3); controls.target.set(0, 0, 0); }
+}
+
+// ---------- 접도 분석: 대지 경계 바깥쪽 4m 지점이 도로인지, 그 높이는 얼마인지 ----------
+function isRoadParcel(p) { return /도$/.test(((p.props && p.props.jibun) || '').trim()); }
+function bearingName(nx, ny) {
+  const a = (Math.atan2(nx, ny) * 180) / Math.PI; // 0 = 북, 시계방향
+  const names = ['북', '북동', '동', '남동', '남', '남서', '서', '북서'];
+  return names[Math.round(((a + 360) % 360) / 45) % 8];
+}
+function analyzeRoads() {
+  if (!S.siteParcels.length) return [];
+  const samples = [];
+  S.siteParcels.forEach((sp) => {
+    const r = polyArea(sp.ring) < 0 ? sp.ring.slice().reverse() : sp.ring; // CCW
+    r.forEach((a, i) => {
+      const b = r[(i + 1) % r.length];
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (L < 0.5) return;
+      const nx = (b[1] - a[1]) / L, ny = -(b[0] - a[0]) / L; // 바깥 법선
+      const n = Math.max(1, Math.round(L / 2));
+      for (let k = 0; k < n; k++) {
+        const t = (k + 0.5) / n, x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
+        const ox = x + nx * 4, oy = y + ny * 4;
+        if (S.siteParcels.some((q) => pip([ox, oy], q.ring))) continue; // 대지 내부 경계
+        const hit = S.parcels.find((q) => pip([ox, oy], q.ring));
+        const road = !hit || isRoadParcel(hit);
+        samples.push({ x, y, ox, oy, nx, ny, len: L / n, road, edgeG: elev(x, y), roadG: elev(ox, oy) });
+      }
+    });
+  });
+  // 도로 샘플 묶기: 6m 이내 + 법선 방향 차 50° 이내
+  const rs = samples.filter((q) => q.road);
+  const par = rs.map((_, i) => i);
+  const find = (i) => (par[i] === i ? i : (par[i] = find(par[i])));
+  for (let i = 0; i < rs.length; i++) for (let j = i + 1; j < rs.length; j++) {
+    const A = rs[i], B = rs[j];
+    if (Math.hypot(A.x - B.x, A.y - B.y) < 6 && A.nx * B.nx + A.ny * B.ny > Math.cos((50 * Math.PI) / 180)) par[find(i)] = find(j);
+  }
+  const groups = {};
+  rs.forEach((q, i) => (groups[find(i)] = groups[find(i)] || []).push(q));
+  const roads = Object.values(groups).filter((g) => g.reduce((a, q) => a + q.len, 0) >= 4).map((g) => {
+    const len = g.reduce((a, q) => a + q.len, 0);
+    const nx = g.reduce((a, q) => a + q.nx * q.len, 0), ny = g.reduce((a, q) => a + q.ny * q.len, 0);
+    const hs = g.map((q) => q.roadG);
+    const lo = Math.min(...hs), hi = Math.max(...hs), avg = g.reduce((a, q) => a + q.roadG * q.len, 0) / len;
+    // 접도 구간 양 끝 사이 경사
+    let far = [g[0], g[0]], best = -1;
+    g.forEach((p) => g.forEach((q) => { const d = Math.hypot(p.x - q.x, p.y - q.y); if (d > best) { best = d; far = [p, q]; } }));
+    const slope = best > 0 ? (Math.abs(far[0].roadG - far[1].roadG) / best) * 100 : 0;
+    return { dir: bearingName(nx, ny), len, lo, hi, avg, slope, pts: g };
+  }).sort((a, b) => b.len - a.len);
+  roads.forEach((r, i) => (r.name = String.fromCharCode(65 + i)));
+  return roads;
+}
+function textSprite(text, color = '#1f3b8f') {
+  const c = document.createElement('canvas'), g = c.getContext('2d');
+  g.font = 'bold 44px sans-serif';
+  const w = Math.ceil(g.measureText(text).width) + 28;
+  c.width = w; c.height = 64;
+  g.font = 'bold 44px sans-serif';
+  g.fillStyle = 'rgba(255,255,255,0.9)'; g.fillRect(0, 0, w, 64);
+  g.strokeStyle = color; g.lineWidth = 4; g.strokeRect(2, 2, w - 4, 60);
+  g.fillStyle = color; g.textBaseline = 'middle'; g.fillText(text, 14, 34);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false }));
+  sp.scale.set(w / 9, 64 / 9, 1);
+  sp.renderOrder = 10;
+  return sp;
+}
+function drawRoads() {
+  S.roads = T.ready ? analyzeRoads() : [];
+  const box = $('roadList');
+  if (!S.roads.length) { box.innerHTML = T.ready ? '접도 구간을 찾지 못했어요.' : '지형을 불러오면 분석해요.'; return; }
+  S.roads.forEach((r) => {
+    const pts = r.pts.map((q) => new THREE.Vector3(q.ox, q.roadG + 0.4, -q.oy));
+    const g = new THREE.BufferGeometry().setFromPoints(pts);
+    groupCtx.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x1f3b8f, size: 2.2, sizeAttenuation: true })));
+    const mid = r.pts[Math.floor(r.pts.length / 2)];
+    const lab = textSprite(`${r.name} ${r.avg >= 0 ? '+' : ''}${r.avg.toFixed(1)}m`);
+    lab.position.set(mid.ox + mid.nx * 6, mid.roadG + 10, -(mid.oy + mid.ny * 6));
+    groupCtx.add(lab);
+  });
+  const all = S.roads.map((r) => r.avg);
+  const diff = Math.max(...all) - Math.min(...all);
+  const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
+  box.innerHTML = S.roads.map((r) => `<b>${r.name}</b> ${r.dir}측 · 접도 ${r.len.toFixed(0)}m · 평균 ${fmt(r.avg)}m (${fmt(r.lo)} ~ ${fmt(r.hi)}) · 경사 ${r.slope.toFixed(1)}%`).join('<br>') +
+    (S.roads.length > 1 ? `<br><b>도로 간 높이차 ${diff.toFixed(1)}m</b> (평균 기준) · 최대 ${(Math.max(...S.roads.map((r) => r.hi)) - Math.min(...S.roads.map((r) => r.lo))).toFixed(1)}m` : '') +
+    `<br><span class="dim">기준 0 = 대지 최저점 (해발 ${T.base.toFixed(1)}m). 경계 밖 4m 지점의 지형 높이.</span>`;
 }
 
 function updateStats() {
@@ -488,7 +581,7 @@ function sitePoints() {
 function runViewAnalysis() {
   groupLines.clear();
   const targets = sitePoints();
-  const ctx = S.buildings.filter((b) => !b.onSite);
+  const ctx = S.buildings.filter((b) => !b.onSite && b.mesh);
   const meshes = ctx.map((b) => b.mesh).concat(S.groundMesh ? [S.groundMesh] : []);
   const showLines = $('showLines').checked;
   const results = [];
@@ -572,7 +665,9 @@ function addSectionPoint(p) {
   groupLines.children.filter((o) => o.userData.section).forEach((o) => groupLines.remove(o));
   if (S.sectionPts.length === 2) {
     const [a, b] = S.sectionPts;
-    const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(a[0], 0.5, -a[1]), new THREE.Vector3(b[0], 0.5, -b[1])]), new THREE.LineBasicMaterial({ color: 0x0044ff }));
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]), n = Math.max(2, Math.ceil(L / 2)), pts = [];
+    for (let i = 0; i <= n; i++) { const x = a[0] + ((b[0] - a[0]) * i) / n, y = a[1] + ((b[1] - a[1]) * i) / n; pts.push(new THREE.Vector3(x, elev(x, y) + 0.6, -y)); }
+    const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x0044ff, depthTest: false }));
     ln.userData.section = true; groupLines.add(ln);
   }
 }
@@ -590,31 +685,44 @@ function drawSection() {
   for (let i = 0; i <= N; i++) {
     const t = i / N, pt = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
     const g = groundAt(pt);
-    const bl = S.buildings.find((q) => pip(pt, q.ring));
+    const bl = S.buildings.find((q) => q.mesh && pip(pt, q.ring));
     samples.push({ d: t * L, g: g ? g.g : null, site: g && g.site, top: bl ? bl.ground + bl.height : null, bg: bl ? bl.ground : null });
   }
+  const ex = parseFloat($('secEx').value) || 1;
   const gs = samples.filter((s) => s.g !== null).map((s) => s.g);
   const tops = samples.filter((s) => s.top !== null).map((s) => s.top);
-  const ymin = Math.min(0, ...gs) - 2, ymax = Math.max(10, ...tops, ...gs) + 4;
-  const W = 600, H = 220, sx = W / L, sy = Math.min((H - 20) / (ymax - ymin), sx * 1.0);
-  const Y = (v) => H - 10 - (v - ymin) * sy;
-  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%">`;
-  // 건물
+  const ymin = Math.min(...gs) - 2, ymax = Math.max(Math.min(...gs) + 10, ...tops, ...gs) + 3;
+  const W = 1000, H = 300, padL = 46, padB = 22, padR = 34;
+  const sx = (W - padL - padR) / L;
+  const sy = Math.min((H - padB - 14) / (ymax - ymin), sx * ex);
+  const X = (d) => padL + d * sx, Y = (v) => H - padB - (v - ymin) * sy;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="font:12px sans-serif">`;
+  // 높이 눈금
+  const stepV = ymax - ymin > 40 ? 10 : 5;
+  for (let v = Math.ceil(ymin / stepV) * stepV; v <= ymax; v += stepV) svg += `<line x1="${padL}" x2="${W - 10}" y1="${Y(v)}" y2="${Y(v)}" stroke="#eee"/><text x="${padL - 6}" y="${Y(v) + 4}" text-anchor="end" fill="#888">${v >= 0 ? '+' : ''}${v}</text>`;
   let run = null;
-  const flush = (end) => { if (run) { svg += `<rect x="${run.d0 * sx}" y="${Y(run.top)}" width="${(end - run.d0) * sx}" height="${Y(run.bg) - Y(run.top)}" fill="#cfcac0" stroke="#555" stroke-width="0.6"/>`; run = null; } };
+  const flush = (end) => { if (run) { svg += `<rect x="${X(run.d0)}" y="${Y(run.top)}" width="${(end - run.d0) * sx}" height="${Y(run.bg) - Y(run.top)}" fill="#d9d4ca" stroke="#666" stroke-width="0.8"/>`; run = null; } };
   samples.forEach((s) => {
     if (s.top === null || (run && (run.top !== s.top || run.bg !== s.bg))) flush(s.d);
     if (s.top !== null && !run) run = { d0: s.d, top: s.top, bg: s.bg };
   });
   flush(L);
-  // 지반선
   let path = '';
-  samples.forEach((s, i) => { if (s.g !== null) path += (path ? 'L' : 'M') + (s.d * sx).toFixed(1) + ' ' + Y(s.g).toFixed(1); });
-  svg += `<path d="${path}" fill="none" stroke="#222" stroke-width="1.6"/>`;
+  samples.forEach((s) => { if (s.g !== null) path += (path ? 'L' : 'M') + X(s.d).toFixed(1) + ' ' + Y(s.g).toFixed(1); });
+  svg += `<path d="${path}" fill="none" stroke="#111" stroke-width="2"/>`;
   // 대지 구간
-  samples.forEach((s) => { if (s.site) svg += `<rect x="${s.d * sx - 0.6}" y="${Y(s.g) - 1}" width="1.6" height="3" fill="#d94f3d"/>`; });
-  svg += `<text x="4" y="16" font-size="15">단면 길이 ${L.toFixed(0)}m · 수직 축척 = 수평과 동일 · 빨강 = 대지</text></svg>`;
+  let sr = null; const sites = [];
+  samples.forEach((s) => { if (s.site && !sr) sr = { d0: s.d }; if (!s.site && sr) { sr.d1 = s.d; sites.push(sr); sr = null; } });
+  if (sr) { sr.d1 = L; sites.push(sr); }
+  sites.forEach((r) => { svg += `<rect x="${X(r.d0)}" y="${H - padB + 3}" width="${(r.d1 - r.d0) * sx}" height="6" fill="#d94f3d"/>`; });
+  // 양 끝·대지 경계 지반고 표기
+  const lab = (d) => { const s = samples.reduce((p, q) => (Math.abs(q.d - d) < Math.abs(p.d - d) ? q : p)); if (s.g === null) return ''; return `<circle cx="${X(s.d)}" cy="${Y(s.g)}" r="3" fill="#1f3b8f"/><text x="${X(s.d)}" y="${Y(s.g) - 8}" text-anchor="middle" fill="#1f3b8f" font-weight="bold">${s.g >= 0 ? '+' : ''}${s.g.toFixed(1)}</text>`; };
+  svg += lab(0) + lab(L);
+  sites.forEach((r) => { svg += lab(r.d0) + lab(r.d1); });
+  svg += `<text x="${padL}" y="${H - 4}" fill="#555">0</text><text x="${W - 10}" y="${H - 4}" text-anchor="end" fill="#555">${L.toFixed(0)}m</text>`;
+  svg += `<text x="${padL + 4}" y="14" fill="#333">단면 길이 ${L.toFixed(0)}m · 수직 과장 ×${(sy / sx).toFixed(1)} · 빨강 띠 = 대지 · 파랑 = 지반고(m, 대지 최저점 기준)</text></svg>`;
   $('section').innerHTML = svg;
+  $('sectionBox').style.display = 'block';
 }
 
 // ---------- 내보내기 ----------
@@ -682,6 +790,9 @@ function init() {
   $('btnDemo').onclick = loadDemo;
   $('btnTerrain').onclick = () => sampleTerrain();
   $('showContours').onchange = () => S.origin && buildScene(false);
+  $('hideSiteBldg').onchange = () => S.origin && buildScene(false);
+  $('secEx').onchange = () => S.sectionPts.length === 2 && drawSection();
+  $('secClose').onclick = () => { $('sectionBox').style.display = 'none'; };
   $('floorH').onchange = (e) => {
     S.floorH = parseFloat(e.target.value) || 3.3;
     S.buildings.forEach((b) => { if (b.heightSrc !== 'data') b.height = b.floors * S.floorH; });
