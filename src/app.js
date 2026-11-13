@@ -632,34 +632,83 @@ function sitePoints() {
   });
   return pts;
 }
-function runViewAnalysis() {
+// 원인: 지형 메시(8만 삼각형)와 건물 수백 동에 광선을 수만 번 쏘아 화면이 멈췄음.
+// 해결: 건물은 격자 색인 + 2D 선분-다각형 교차로, 지형은 선을 따라 높이만 샘플링, 그리고 나눠서 계산.
+let viewRun = 0;
+async function runViewAnalysis() {
+  const run = ++viewRun;
   groupLines.clear();
-  const targets = sitePoints();
+  const all = sitePoints();
+  const step = Math.max(1, Math.ceil(all.length / 24)); // 대지 표본점은 최대 ~24개
+  const targets = all.filter((_, i) => i % step === 0);
   const ctx = S.buildings.filter((b) => !b.onSite && b.mesh);
-  const meshes = ctx.map((b) => b.mesh).concat(S.groundMesh ? [S.groundMesh] : []);
+  // 건물 bbox 격자 색인 (20m)
+  const CELL = 20, grid = new Map();
+  ctx.forEach((b, bi) => {
+    const xs = b.ring.map((q) => q[0]), ys = b.ring.map((q) => q[1]);
+    b._bb = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    for (let gx = Math.floor(b._bb[0] / CELL); gx <= Math.floor(b._bb[2] / CELL); gx++)
+      for (let gy = Math.floor(b._bb[1] / CELL); gy <= Math.floor(b._bb[3] / CELL); gy++) {
+        const k = gx + ',' + gy; if (!grid.has(k)) grid.set(k, []); grid.get(k).push(bi);
+      }
+  });
+  const segX = (ax, ay, bx, by, cx, cy, dx, dy) => { // 선분 AB와 CD 교차 시 AB 위의 t
+    const rx = bx - ax, ry = by - ay, sx = dx - cx, sy = dy - cy, den = rx * sy - ry * sx;
+    if (Math.abs(den) < 1e-9) return null;
+    const t = ((cx - ax) * sy - (cy - ay) * sx) / den, u = ((cx - ax) * ry - (cy - ay) * rx) / den;
+    return t > 0 && t < 1 && u >= 0 && u <= 1 ? t : null;
+  };
+  function blocked(E, P, self) {
+    const L = Math.hypot(P.x - E.x, P.y - E.y);
+    // 건물
+    const seen = new Set();
+    for (let d = 0; d <= L + CELL; d += CELL / 2) {
+      const t = Math.min(1, d / L), x = E.x + (P.x - E.x) * t, y = E.y + (P.y - E.y) * t;
+      const list = grid.get(Math.floor(x / CELL) + ',' + Math.floor(y / CELL)) || [];
+      for (const bi of list) {
+        if (seen.has(bi)) continue; seen.add(bi);
+        const b = ctx[bi]; if (b === self) continue;
+        const top = b.ground + b.height, r = b.ring;
+        for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+          const tt = segX(E.x, E.y, P.x, P.y, r[j][0], r[j][1], r[i][0], r[i][1]);
+          if (tt !== null && E.z + (P.z - E.z) * tt < top) return true;
+        }
+      }
+    }
+    // 지형 (양 끝 3m 제외)
+    if (T.ready) for (let d = 3; d < L - 3; d += 3) {
+      const t = d / L, x = E.x + (P.x - E.x) * t, y = E.y + (P.y - E.y) * t;
+      if (elev(x, y) > E.z + (P.z - E.z) * t + 0.1) return true;
+    }
+    return false;
+  }
   const showLines = $('showLines').checked;
   const results = [];
-  ctx.forEach((b) => {
+  $('viewList').innerHTML = '계산 중… 0%';
+  for (let k = 0; k < ctx.length; k++) {
+    const b = ctx[k];
     const c = centroid(b.ring);
-    const eye = new THREE.Vector3(c[0], b.ground + b.height + 1.5, -c[1]);
-    let vis = 0;
-    targets.forEach((t) => {
-      const dir = t.clone().sub(eye); const dist = dir.length(); dir.normalize();
-      raycaster.set(eye, dir); raycaster.far = dist - 0.5;
-      const hits = raycaster.intersectObjects(meshes, false).filter((h) => h.object !== b.mesh);
-      if (!hits.length) {
-        vis++;
-        if (showLines && vis === 1) groupLines.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([eye, t]), new THREE.LineBasicMaterial({ color: 0xff7a00, transparent: true, opacity: 0.5 })));
-      }
-    });
-    const ratio = vis / targets.length;
-    const down = eye.y - siteGround();
+    const E = { x: c[0], y: c[1], z: b.ground + b.height + 1.5 };
+    let vis = 0, firstT = null;
+    for (const t of targets) {
+      const P = { x: t.x, y: -t.z, z: t.y };
+      if (!blocked(E, P, b)) { vis++; if (!firstT) firstT = t; }
+    }
+    const ratio = vis / targets.length, down = E.z - siteGround();
     b.view = { ratio, down };
     const col = new THREE.Color();
     if (ratio === 0) col.set(0xd9d6d0); else col.setHSL(0.08, 0.9, 0.75 - 0.35 * ratio);
     b.mesh.material.color = col;
-    if (ratio > 0) results.push(b);
-  });
+    if (ratio > 0) {
+      results.push(b);
+      if (showLines && firstT) groupLines.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(E.x, E.z, -E.y), firstT]), new THREE.LineBasicMaterial({ color: 0xff7a00, transparent: true, opacity: 0.5 })));
+    }
+    if (k % 25 === 24) { // 화면이 멈추지 않게 나눠서 계산
+      $('viewList').innerHTML = `계산 중… ${Math.round(((k + 1) / ctx.length) * 100)}%`;
+      await new Promise((r) => setTimeout(r, 0));
+      if (run !== viewRun || S.mode !== 'view') return;
+    }
+  }
   results.sort((a, b) => b.view.ratio * b.view.down - a.view.ratio * a.view.down);
   $('viewList').innerHTML = `<b>대지를 내려다보는 건물 ${results.length}동</b> / ${ctx.length}동<br>` +
     results.slice(0, 8).map((b) => `· ${label(b)} — 대지 ${(b.view.ratio * 100).toFixed(0)}% 보임, 눈높이 대지+${b.view.down.toFixed(0)}m`).join('<br>');
