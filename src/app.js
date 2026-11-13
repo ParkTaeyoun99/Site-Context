@@ -520,7 +520,7 @@ function analyzeRoads() {
       const n = Math.max(1, Math.round(L / 2));
       for (let k = 0; k < n; k++) {
         const t = (k + 0.5) / n, x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
-        const ox = x + nx * 4, oy = y + ny * 4;
+        const ox = x + nx * 1.5, oy = y + ny * 1.5; // 좁은 도로(3m)도 잡히게 1.5m 바깥
         if (S.siteParcels.some((q) => pip([ox, oy], q.ring))) continue; // 대지 내부 경계
         const hit = S.parcels.find((q) => pip([ox, oy], q.ring));
         const kind = linearKind(hit);
@@ -547,7 +547,19 @@ function analyzeRoads() {
     let far = [g[0], g[0]], best = -1;
     g.forEach((p) => g.forEach((q) => { const d = Math.hypot(p.x - q.x, p.y - q.y); if (d > best) { best = d; far = [p, q]; } }));
     const slope = best > 0 ? (Math.abs(far[0].roadG - far[1].roadG) / best) * 100 : 0;
-    return { dir: bearingName(nx, ny), kind: g[0].kind, len, lo, hi, avg, slope, pts: g };
+    // 도로 폭 추정: 접도점에서 바깥 법선으로 나아가 건너편 일반 대지에 닿는 거리 (중앙값)
+    const ws = [];
+    g.forEach((q, qi) => {
+      if (qi % 2) return;
+      for (let d = 0.5; d <= 40; d += 0.25) {
+        const x = q.x + q.nx * d, y = q.y + q.ny * d;
+        const hit = S.parcels.find((pp) => pip([x, y], pp.ring));
+        if (hit && !linearKind(hit) && !S.siteParcels.includes(hit)) { ws.push(d); break; }
+      }
+    });
+    ws.sort((a, b) => a - b);
+    const width = ws.length >= 3 ? ws[Math.floor(ws.length / 2)] : null;
+    return { dir: bearingName(nx, ny), kind: g[0].kind, len, lo, hi, avg, slope, pts: g, width };
   }).sort((a, b) => b.len - a.len);
   // 이름: 도로명주소 도로구간(중심선) 중 접도 지점에 가장 가까운 도로명으로 투표, 없으면 방향·종류
   const near = (x, y) => {
@@ -598,9 +610,9 @@ function drawRoads() {
   const all = S.roads.map((r) => r.avg);
   const diff = Math.max(...all) - Math.min(...all);
   const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
-  box.innerHTML = S.roads.map((r, i) => `<input class="rname" data-ri="${i}" value="${r.name.replace(/"/g, '&quot;')}" title="이름 고치기"> ${r.name.includes(r.kind) ? '' : r.dir + '측 ' + r.kind + ' '}· 접도 ${r.len.toFixed(0)}m · 평균 ${fmt(r.avg)}m (${fmt(r.lo)} ~ ${fmt(r.hi)}) · 경사 ${r.slope.toFixed(1)}%`).join('<br>') +
+  box.innerHTML = S.roads.map((r, i) => `<input class="rname" data-ri="${i}" value="${r.name.replace(/"/g, '&quot;')}" title="이름 고치기"> ${r.name.includes(r.kind) ? '' : r.dir + '측 ' + r.kind + ' '}· 접도 ${r.len.toFixed(0)}m${r.width ? ` · 폭 약 ${r.width.toFixed(1)}m` + (r.kind === '도로' && r.width < 4 ? ' <b class="warn">(4m 미만 → 확폭 ' + ((4 - r.width) / 2).toFixed(2) + 'm 후퇴)</b>' : '') : ''} · 평균 ${fmt(r.avg)}m (${fmt(r.lo)} ~ ${fmt(r.hi)}) · 경사 ${r.slope.toFixed(1)}%`).join('<br>') +
     (S.roads.length > 1 ? `<br><b>접도 간 높이차 ${diff.toFixed(1)}m</b> (평균 기준) · 최대 ${(Math.max(...S.roads.map((r) => r.hi)) - Math.min(...S.roads.map((r) => r.lo))).toFixed(1)}m` : '') +
-    `<br><span class="dim">기준 0 = 대지 최저점 (해발 ${T.base.toFixed(1)}m). 경계 밖 4m 지점의 지형 높이. 이름 칸을 눌러 고칠 수 있어요.</span>`;
+    `<br><span class="dim">기준 0 = 대지 최저점 (해발 ${T.base.toFixed(1)}m). 경계 밖 1.5m 지점의 지형 높이. 이름 칸을 눌러 고칠 수 있어요.</span>`;
   box.querySelectorAll('input.rname').forEach((inp) => (inp.onchange = () => {
     const r = S.roads[+inp.dataset.ri], v = inp.value.trim();
     S.roadNames = S.roadNames || {};
@@ -905,7 +917,7 @@ function siteExteriorEdges() {
         const p1 = [a[0] + ((b[0] - a[0]) * (k + 1)) / n, a[1] + ((b[1] - a[1]) * (k + 1)) / n];
         const m = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2];
         if (S.siteParcels.some((q) => pip([m[0] + nx * 0.6, m[1] + ny * 0.6], q.ring))) continue;
-        const hit = S.parcels.find((q) => pip([m[0] + nx * 4, m[1] + ny * 4], q.ring));
+        const hit = S.parcels.find((q) => pip([m[0] + nx * 1.5, m[1] + ny * 1.5], q.ring));
         edges.push({ a: p0, b: p1, nx, ny, road: !!linearKind(hit) });
       }
     });
@@ -1209,17 +1221,62 @@ async function scaleStudy() {
   const sun = $('zSun').checked, sunRoad = $('zSunRoad').checked, sunNew = $('zSunRule').value === 'new';
   const sunD = Math.max(1.5, parseFloat($('zSunD').value) || 1.5), sunD2 = Math.max(5, parseFloat($('zSunD2').value) || 5);
   const fh = S.floorH;
-  const area = S.siteParcels.reduce((a, p) => a + Math.abs(polyArea(p.ring)), 0);
-  const bcrA = (area * bcr) / 100, farGFA = (area * far) / 100;
+  let area = S.siteParcels.reduce((a, p) => a + Math.abs(polyArea(p.ring)), 0);
+  let bcrA = (area * bcr) / 100, farGFA = (area * far) / 100;
   // 1) 대지 외곽 (필지 합치기) — 미세한 틈은 닫고
   const site = cleanPaths(offs(offs(uni(S.siteParcels.map((p) => toP(p.ring))), 0.05), -0.05));
   const edges = siteExteriorEdges();
   const bpts = edges.map((e) => [(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2]);
   const G0 = bpts.reduce((a, [x, y]) => a + elev(x, y), 0) / Math.max(1, bpts.length);
   // 2) 이격: 경계 조각마다 도로/인접대지 거리만큼 띠를 만들어 빼기
+  //    A1 소요폭 미달 도로 확폭(건축법 46조): 폭 4m 미만 도로는 중심선에서 2m가 건축선 → (4−폭)/2 후퇴
+  const roads = S.roads || [];
+  const roadOf = (m) => { let best = null; roads.forEach((r) => r.pts.forEach((q) => { const d = Math.hypot(q.x - m[0], q.y - m[1]); if (d < 4 && (!best || d < best.d)) best = { d, r }; })); return best && best.r; };
+  const useWiden = $('zWiden').checked, useCorner = $('zCorner').checked;
+  const notes = [], cornerCuts = [];
+  edges.forEach((e) => {
+    e.widen = 0;
+    if (!e.road || !useWiden) return;
+    const r = roadOf([(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2]);
+    if (r && r.kind === '도로' && r.width && r.width < 4) { e.widen = (4 - r.width) / 2; e.roadRef = r; }
+  });
+  roads.filter((r) => r.kind === '도로' && r.width && r.width < 4 && useWiden).forEach((r) => notes.push(`${r.name} 폭 ${r.width.toFixed(1)}m → 건축선 ${((4 - r.width) / 2).toFixed(2)}m 후퇴`));
   let buildable = site;
   const bands = [];
-  edges.forEach((e) => { const d = e.road ? sbRoad : sbNb; if (d > 0) bands.push(...offs([toP([e.a, e.b])], d, true)); });
+  edges.forEach((e) => { const d = (e.road ? sbRoad : sbNb) + (e.widen || 0); if (d > 0) bands.push(...offs([toP([e.a, e.b])], d, true)); });
+  //    A2 가각전제(시행령 31조): 8m 미만 도로가 120° 미만으로 만나는 모퉁이를 표의 길이만큼 자름
+  const widenStrips = [];
+  edges.forEach((e) => { if (e.widen > 0) widenStrips.push(...offs([toP([e.a, e.b])], e.widen, true)); });
+  const siteW = widenStrips.length ? cleanPaths(diff(site, uni(widenStrips))) : site;
+  if (useCorner) {
+    const tbl = { lt90: { '68': { '68': 4, '46': 3 }, '46': { '68': 3, '46': 2 } }, lt120: { '68': { '68': 3, '46': 2 }, '46': { '68': 2, '46': 2 } } };
+    const cls = (w) => (w >= 6 && w < 8 ? '68' : w >= 4 && w < 6 ? '46' : null);
+    siteW.forEach((path) => { // 확폭 후 건축선 모퉁이에서 자름
+      const ring = fromP(ClipperLib.Clipper.CleanPolygon(path, 0.3 * CS)), n = ring.length;
+      for (let i = 0; i < n; i++) {
+        const V = ring[i], A = ring[(i + n - 1) % n], B = ring[(i + 1) % n];
+        const ma = [(A[0] + V[0]) / 2, (A[1] + V[1]) / 2], mb = [(B[0] + V[0]) / 2, (B[1] + V[1]) / 2];
+        const ra = roadOf(ma) || roadOf(A), rb = roadOf(mb) || roadOf(B);
+        if (!ra || !rb || ra === rb || ra.kind !== '도로' || rb.kind !== '도로' || !ra.width || !rb.width) continue;
+        const wa = Math.max(4, ra.width), wb = Math.max(4, rb.width); // 확폭 후 폭으로 판정
+        const ca = cls(wa), cb = cls(wb);
+        if (!ca || !cb) continue; // 한쪽이라도 8m 이상이면 해당 없음
+        const ua = [A[0] - V[0], A[1] - V[1]], ub = [B[0] - V[0], B[1] - V[1]];
+        const la = Math.hypot(...ua), lb = Math.hypot(...ub);
+        const ang = (Math.acos(Math.max(-1, Math.min(1, (ua[0] * ub[0] + ua[1] * ub[1]) / (la * lb)))) * 180) / Math.PI;
+        if (ang >= 120) continue;
+        const L = tbl[ang < 90 ? 'lt90' : 'lt120'][cb][ca];
+        if (la < L || lb < L) continue;
+        const P1 = [V[0] + (ua[0] / la) * L, V[1] + (ua[1] / la) * L], P2 = [V[0] + (ub[0] / lb) * L, V[1] + (ub[1] / lb) * L];
+        bands.push(toP([V, P1, P2])); cornerCuts.push(toP([V, P1, P2]));
+        notes.push(`가각전제 ${L}m × ${L}m (${ra.name} · ${rb.name}, ${ang.toFixed(0)}°)`);
+      }
+    });
+  }
+  // 법적 대지면적: 확폭 후퇴 부분과 가각전제 부분은 대지면적에서 뺀다
+  const lost = [...widenStrips, ...cornerCuts];
+  const legalSite = lost.length ? cleanPaths(diff(site, uni(lost))) : site;
+  area = pArea(legalSite); bcrA = (area * bcr) / 100; farGFA = (area * far) / 100;
   if (bands.length) buildable = cleanPaths(diff(site, uni(bands)));
   // 3) 정북 기준선: x 0.5m 간격으로, 대지 가장 북쪽 경계 → (도로면 건너편까지) 인접 대지경계
   const xs = S.siteParcels.flatMap((p) => p.ring.map((q) => q[0]));
@@ -1272,26 +1329,70 @@ async function scaleStudy() {
     return out;
   }
   const projA = (fl) => (fl.length ? pArea(cleanPaths(uni(fl.flatMap((f) => f.plate)))) : 0);
+  const nMaxIn = parseInt($('zFloors').value, 10), nMax = nMaxIn > 0 ? nMaxIn : 80;
+  const uniform = $('zMode').value === 'uniform';
   let foot = avail1, floors = stack(foot);
-  if (projA(floors) > bcrA) {
+  if (uniform) {
+    // A6 전층 외벽 일치: 한 평면을 N층 쌓음. 맨 위층 높이의 사선을 전체에 적용. 용적률을 가장 많이 쓰는 N, 같으면 큰 N(작은 바닥)
+    let best = null;
+    for (let N = 1; N <= nMax; N++) {
+      if (N * fh > hMax + 1e-6) break;
+      const av = limit(buildable, N * fh), avA = pArea(av);
+      if (avA < 10) break;
+      const A = Math.min(avA, bcrA, farGFA / N), g = A * N;
+      if (!best || g > best.g + 0.5 || (Math.abs(g - best.g) <= 0.5 && N > best.N)) best = { N, A, g, av };
+    }
+    floors = [];
+    if (best) {
+      if ($('zHigh').checked && T.ready) {
+        // 지하층 유리 배치: 대지의 오르막 방향으로 반평면을 밀어 필요한 면적만큼 높은 쪽을 자름
+        const pts = fromP(best.av[0] || []); let gx = 0, gy = 0;
+        const c0 = pts.reduce((a, q) => [a[0] + q[0] / pts.length, a[1] + q[1] / pts.length], [0, 0]);
+        pts.forEach((q) => { const e = elev(q[0], q[1]) - elev(c0[0], c0[1]); gx += (q[0] - c0[0]) * e; gy += (q[1] - c0[1]) * e; });
+        const gl = Math.hypot(gx, gy);
+        if (gl > 1e-6) {
+          const ux = gx / gl, uy = gy / gl, vx = -uy, vy = ux, B = 1e3;
+          const half = (c) => [toP([[ux * c + vx * B, uy * c + vy * B], [ux * c - vx * B, uy * c - vy * B], [ux * (c + B) - vx * B, uy * (c + B) - vy * B], [ux * (c + B) + vx * B, uy * (c + B) + vy * B]])];
+          let lo = -B, hi = B, got = null;
+          for (let it = 0; it < 40; it++) { const m = (lo + hi) / 2, r = cleanPaths(inter(best.av, half(m))); if (pArea(r) > best.A) lo = m; else { hi = m; got = r; } } // 한도를 넘지 않는 쪽
+          foot = got && pArea(got) > 0 ? got : shrinkTo(best.av, best.A);
+        } else foot = shrinkTo(best.av, best.A);
+      } else foot = shrinkTo(best.av, best.A);
+      for (let k = 1; k <= best.N; k++) { const pl = cutPath(foot, k); floors.push({ k, top: k * fh, plate: pl, area: pArea(pl), partial: false }); }
+    }
+  } else {
+    floors = floors.filter((f) => f.k <= nMax);
+  }
+  if (!uniform && projA(floors) > bcrA) {
     let lo = 0, hi = 30;
     for (let it = 0; it < 18; it++) {
-      const m = (lo + hi) / 2, f = cleanPaths(offs(avail1, -m)), fl = stack(f);
+      const m = (lo + hi) / 2, f = cleanPaths(offs(avail1, -m)), fl = stack(f).filter((x) => x.k <= nMax);
       if (projA(fl) > bcrA) lo = m; else { hi = m; foot = f; floors = fl; }
     }
   }
   const footA = projA(floors);
   const gfa = floors.reduce((a, f) => a + f.area, 0);
+  // A7 지하층 판정(시행령 119조): 지하층 둘레 지표면의 가중평균 − 지하층 바닥 ≥ 층고/2
+  let bInfo = '';
+  if ($('zBase').checked && floors.length) {
+    const bfl = floors[0].plate.length ? cleanPaths(uni(floors.map((f) => f.plate).flat())) : [];
+    let sumL = 0, sumG = 0;
+    bfl.forEach((q) => { const r = fromP(q); densify(r, 0.5).forEach((pt, i, arr) => { const nx = arr[(i + 1) % arr.length], L = Math.hypot(nx[0] - pt[0], nx[1] - pt[1]); sumG += elev(pt[0], pt[1]) * L; sumL += L; }); });
+    const avgG = sumL ? sumG / sumL : 0;
+    const fl1 = isNaN(parseFloat($('zFL1').value)) ? G0 : parseFloat($('zFL1').value);
+    const b1 = fl1 - fh, depth = avgG - b1, ok = depth >= fh / 2 - 0.005;
+    bInfo = `<tr><td>지하 1층 판정</td><td><b class="${ok ? 'ok' : 'warn'}">${ok ? '지하층 (용적률 제외)' : '지상층으로 봄'}</b><br><span class="dim">가중평균 지표면 +${avgG.toFixed(2)} · 지하 바닥 ${b1 >= 0 ? '+' : ''}${b1.toFixed(2)} → ${depth.toFixed(2)}m ${ok ? '≥' : '<'} 층고/2 ${(fh / 2).toFixed(2)}m</span></td></tr>`;
+  }
   S.mass = { G0, fh, floors, buildable, foot, site };
   drawMass();
   const maxH = floors.length ? floors[floors.length - 1].top : 0;
-  const govern = gfa >= farGFA - 1 ? '용적률' : floors.length && floors[floors.length - 1].top + fh > hMax ? '최고높이' : '정북일조사선·이격';
+  const govern = gfa >= farGFA * 0.99 ? '용적률' : floors.length && floors[floors.length - 1].top + fh > hMax ? '최고높이' : '정북일조사선·이격';
   $('massInfo').innerHTML = `
     <table class="tbl"><tr><th>층</th><th>바닥면적</th><th>누계</th></tr>
     ${floors.slice().reverse().map((f) => `<tr${f.partial ? ' class="part"' : ''}><td>${f.k}F</td><td>${f.area.toFixed(1)}㎡</td><td>${floors.filter((g) => g.k <= f.k).reduce((a, g) => a + g.area, 0).toFixed(1)}</td></tr>`).join('')}
     </table>
     <table class="tbl sum">
-      <tr><td>대지면적</td><td>${area.toFixed(1)}㎡</td></tr>
+      <tr><td>대지면적</td><td>${area.toFixed(1)}㎡${lost.length ? ' <span class="dim">(확폭·가각 제외)</span>' : ''}</td></tr>
       <tr><td>건축면적</td><td>${footA.toFixed(1)}㎡ <span class="dim">(한도 ${bcrA.toFixed(1)})</span></td></tr>
       <tr><td>건폐율</td><td><b>${((footA / area) * 100).toFixed(2)}%</b> <span class="dim">/ ${bcr}%</span></td></tr>
       <tr><td>연면적(지상)</td><td>${gfa.toFixed(1)}㎡ <span class="dim">(한도 ${farGFA.toFixed(1)})</span></td></tr>
@@ -1299,8 +1400,10 @@ async function scaleStudy() {
       <tr><td>규모</td><td>지상 ${floors.length}층 · 높이 ${maxH.toFixed(1)}m</td></tr>
       <tr><td>규모 결정</td><td><b>${govern}</b></td></tr>
       ${P ? `<tr><td>관통 동선</td><td>${P.label}</td></tr>` : ''}
+      ${bInfo}
+      ${notes.length ? `<tr><td>건축선</td><td>${notes.join('<br>')}</td></tr>` : ''}
     </table>
-    <span class="dim">층고 ${fh}m · 높이 기준면 +${G0.toFixed(1)}m(경계 평균 지반) · 건축면적 = 전 층 수평투영 · 건폐율 초과분은 외곽을 균일하게 줄여 맞춤 · 최상층은 남은 용적률만큼 축소</span>`;
+    <span class="dim">${uniform ? '전층 외벽 일치 · ' : ''}층고 ${fh}m · 높이 기준면 +${G0.toFixed(1)}m(경계 평균 지반) · 건축면적 = 전 층 수평투영 · 건폐율 초과분은 외곽을 균일하게 줄여 맞춤 · 최상층은 남은 용적률만큼 축소</span>`;
 }
 function drawMass() {
   if (S.massGroup) groupCtx.remove(S.massGroup);
