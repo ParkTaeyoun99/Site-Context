@@ -841,7 +841,7 @@ function buildEnvelope() {
   if (!S.siteParcels.length) return;
   const cs = 0.5;
   const bcr = parseFloat($('zBcr').value) || 0, far = parseFloat($('zFar').value) || 0;
-  const hIn = parseFloat($('zHmax').value); const hMax = hIn > 0 ? hIn : 100; // 미입력 시 표시 상한 100m
+  const hIn = parseFloat($('zHmax').value); const hMax = hIn > 0 ? hIn : 30; // 미입력 시 표시 상한 30m
   const sbRoad = parseFloat($('zSbRoad').value) || 0, sbNb = parseFloat($('zSbNb').value) || 0;
   const sun = $('zSun').checked, sunRoad = $('zSunRoad').checked;
   const fh = S.floorH;
@@ -879,7 +879,8 @@ function buildEnvelope() {
   const envGFA = cells.reduce((a, c) => a + c.floors * cellA, 0);
   const envFoot = cells.length * cellA;
   const maxF = Math.max(0, ...cells.map((c) => c.floors));
-  S.env = { cs, X0, Y0, nx, ny, cells, G0, fh };
+  const farFloors = bcr > 0 ? far / bcr : 0; // 건폐율을 꽉 채웠을 때 필요한 층수
+  S.env = { cs, X0, Y0, nx, ny, cells, G0, fh, farFloors, edges };
   drawEnvelope();
   const farGFA = (area * far) / 100, bcrA = (area * bcr) / 100;
   const govern = envGFA >= farGFA ? `용적률이 규모를 결정 (볼륨 안에 여유 ${(envGFA - farGFA).toFixed(0)}㎡)` : `사선·높이 볼륨이 규모를 결정 (용적률 ${((envGFA / area) * 100).toFixed(0)}%까지만 가능)`;
@@ -890,32 +891,69 @@ function buildEnvelope() {
     <b>볼륨이 담는 연면적</b> ${envGFA.toFixed(0)}㎡ · 최고 ${maxF}층<br>
     <b>→ ${govern}</b><br>
     건폐율을 꽉 채우면 평균 ${(farGFA / bcrA).toFixed(1)}개 층 · 정북일조로 낮아진 칸 ${((sunLimited / Math.max(1, evaluated)) * 100).toFixed(0)}%<br>
-    ${hIn > 0 ? '' : '<span class="warn">최고높이 미입력 → 표시 상한 100m</span><br>'}<span class="dim">0.5m 격자 근사 · 층고 ${fh}m · 지표면은 경계 평균으로 단순화 (고저차 3m 초과 시 구간별 산정은 미반영)</span>`;
+    ${hIn > 0 ? '' : '<span class="warn">최고높이 미입력 → 볼륨은 30m까지만 표시 (실제 제한 아님)</span><br>'}<span class="dim">0.5m 격자 근사 · 층고 ${fh}m · 지표면은 경계 평균으로 단순화 (고저차 3m 초과 시 구간별 산정은 미반영)</span>`;
 }
 function drawEnvelope() {
   if (S.envGroup) groupCtx.remove(S.envGroup);
   const E = S.env;
   if (!E || !$('envShow').checked) return;
   const grp = new THREE.Group();
-  const geo = new THREE.BoxGeometry(E.cs, 1, E.cs);
-  const mat = new THREE.MeshLambertMaterial({ color: 0x3d6fd9, transparent: true, opacity: 0.35, depthWrite: false });
-  const im = new THREE.InstancedMesh(geo, mat, E.cells.length);
-  const M = new THREE.Matrix4();
-  E.cells.forEach((c, k) => {
-    const h = c.floors * E.fh;
-    M.makeScale(1, h, 1); M.setPosition(c.x, c.g + h / 2, -c.y);
-    im.setMatrixAt(k, M);
+  // 법적 최대 볼륨: 겉면만 있는 한 겹짜리 옅은 면 (내부 면이 겹쳐 진해지지 않게)
+  const F = new Map(); E.cells.forEach((c) => F.set(c.i + ',' + c.j, c));
+  const P = [];
+  const quad = (a, b, c, d) => P.push(...a, ...b, ...c, ...a, ...c, ...d);
+  E.cells.forEach((c) => {
+    const x0 = E.X0 + c.i * E.cs, y0 = E.Y0 + c.j * E.cs, x1 = x0 + E.cs, y1 = y0 + E.cs, z = c.g + c.floors * E.fh;
+    quad([x0, z, -y0], [x1, z, -y0], [x1, z, -y1], [x0, z, -y1]);
+    [[0, -1, x0, y0, x1, y0], [0, 1, x0, y1, x1, y1], [-1, 0, x0, y0, x0, y1], [1, 0, x1, y0, x1, y1]].forEach(([di, dj, ax, ay, bx, by]) => {
+      const q = F.get(c.i + di + ',' + (c.j + dj));
+      const zb = q ? q.g + q.floors * E.fh : c.g;
+      if (zb < z) quad([ax, zb, -ay], [bx, zb, -by], [bx, z, -by], [ax, z, -ay]);
+    });
   });
-  grp.add(im);
-  // 층별 외곽선
-  const segs = envOutlines();
+  const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+  grp.add(new THREE.Mesh(sg, new THREE.MeshBasicMaterial({ color: 0x5b8def, transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide })));
+  // 윤곽: 꼭대기 외곽 + 높이가 바뀌는 단 + 모서리 세로선
   const arr = [];
-  segs.forEach(([x0, y0, x1, y1, z]) => arr.push(x0, z, -y0, x1, z, -y1));
+  envTopOutline().forEach(([x0, y0, z0, x1, y1, z1]) => arr.push(x0, z0, -y0, x1, z1, -y1));
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
-  grp.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x1a3a8f, transparent: true, opacity: 0.3 })));
+  grp.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x2b55b8, transparent: true, opacity: 0.8 })));
+  // 용적률 한계 높이: 건폐율을 꽉 채웠을 때 필요한 층수 위치에 빨간 점선 링
+  if (E.farFloors > 0) {
+    const z = E.G0 + E.farFloors * E.fh;
+    const pts = [];
+    E.edges.forEach((e) => pts.push(new THREE.Vector3(e.a[0], z, -e.a[1]), new THREE.Vector3(e.b[0], z, -e.b[1])));
+    const lg = new THREE.BufferGeometry().setFromPoints(pts);
+    const ln = new THREE.LineSegments(lg, new THREE.LineDashedMaterial({ color: 0xd94f3d, dashSize: 1.2, gapSize: 0.8 }));
+    ln.computeLineDistances();
+    grp.add(ln);
+    const lab = textSprite(`용적률 ${$('zFar').value}% ≈ ${E.farFloors.toFixed(1)}층`, '#c0392b');
+    const e0 = E.edges[0];
+    lab.position.set(e0.a[0], z + 4, -e0.a[1]);
+    grp.add(lab);
+  }
   S.envGroup = grp;
   groupCtx.add(grp);
 }
+// 꼭대기 윤곽선 [x0,y0,z0,x1,y1,z1]: 윗면 가장자리(이웃이 더 낮거나 없음) + 외곽을 따라 6m마다 세로선
+function envTopOutline() {
+  const E = S.env; if (!E) return [];
+  const F = new Map(); E.cells.forEach((c) => F.set(c.i + ',' + c.j, c));
+  const segs = [], vcand = [];
+  E.cells.forEach((c) => {
+    const x0 = E.X0 + c.i * E.cs, y0 = E.Y0 + c.j * E.cs, x1 = x0 + E.cs, y1 = y0 + E.cs, z = c.g + c.floors * E.fh;
+    [[0, -1, x0, y0, x1, y0], [0, 1, x0, y1, x1, y1], [-1, 0, x0, y0, x0, y1], [1, 0, x1, y0, x1, y1]].forEach(([di, dj, a, b, cc, d]) => {
+      const q = F.get(c.i + di + ',' + (c.j + dj));
+      if (!q || q.floors < c.floors) segs.push([a, b, z, cc, d, z]);
+      if (!q) vcand.push([a, b, c.g, z]);
+    });
+  });
+  const picked = [];
+  vcand.forEach((v) => { if (picked.every((p) => Math.hypot(v[0] - p[0], v[1] - p[1]) > 8)) picked.push(v); });
+  picked.forEach(([x, y, g, z]) => segs.push([x, y, g, x, y, z]));
+  return segs;
+}
+
 // 층 k(1..)의 외곽: floors≥k 인 셀과 아닌 셀 사이의 격자선. z = 셀 지반 + k·층고 (층 상단)
 function envOutlines() {
   const E = S.env; if (!E) return [];
