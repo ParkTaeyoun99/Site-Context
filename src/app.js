@@ -1572,7 +1572,7 @@ JSON 하나만 답한다. 형식:
 }
 function paramLabel(type, k, v) {
   const d = RULE_TYPES[type].params[k];
-  if (d.kind === 'road') { const r = (S.roads || []).find((x) => x.name === v); return r ? `${r.name} ${r.dir}측 ${r.kind} (${r.avg >= 0 ? '+' : ''}${r.avg.toFixed(1)}m)` : v; }
+  if (d.kind === 'road') { const r = (S.roads || []).find((x) => x.name === v); return r ? `${r.name}${r.name.includes(r.dir + '측') ? '' : ` ${r.dir}측 ${r.kind}`} (${r.avg >= 0 ? '+' : ''}${r.avg.toFixed(1)}m)` : v; }
   return (d.optionLabels && d.optionLabels[v]) || `${v}${d.unit || ''}`;
 }
 function renderRule() {
@@ -1685,14 +1685,63 @@ async function saveRule() {
   try { await db.collection('rules').doc('r' + Date.now()).set(rec); log('규칙을 저장했어요. Claude가 대화에서 읽을 수 있어요.', 'ok'); loadSavedRules(); }
   catch (e) { log('저장 실패: ' + (e.message || e.code), 'err'); }
 }
+let savedRows = [];
 async function loadSavedRules() {
   const db = window.claude && (await window.claude.use('db'));
   if (!db) return;
   try {
-    const snap = await db.collection('rules').orderBy('created', 'desc').limit(10).get();
-    const rows = (snap.docs || snap).map((d) => (d.data ? d.data() : d));
-    $('savedRules').innerHTML = rows.length ? '<b>저장된 규칙</b>' + rows.map((r) => `<div class="card dim">${(r.created || '').slice(0, 10)} · ${r.sentence}<br>${r.understood || ''}</div>`).join('') : '';
+    const snap = await db.collection('rules').orderBy('created', 'desc').limit(20).get();
+    savedRows = (snap.docs || snap).map((d) => {
+      const rec = typeof d.data === 'function' ? d.data() : d.data && typeof d.data === 'object' ? d.data : d;
+      return { id: d.id || (d.ref && d.ref.id) || rec.id, ...rec };
+    });
+    renderSavedRules();
   } catch (e) { /* 비어 있거나 권한 없음 */ }
+}
+function renderSavedRules() {
+  const here = (S.project && S.project.address) || '';
+  $('savedRules').innerHTML = savedRows.length ? '<b>저장된 규칙</b> <span class="dim">(누르면 불러와 다시 계산해요)</span>' + savedRows.map((r, i) => `
+    <div class="card alt saved" data-i="${i}">
+      <span class="dim">${(r.created || '').slice(0, 10)}${r.project && r.project !== here ? ' · 다른 대지' : ''}${r.chosen ? ` · 경사 ${r.chosen.slope_pct}% · L${Math.round(r.chosen.length_m)}m` : ''}</span>
+      <button class="del" data-del="${i}" title="삭제" style="float:right;margin:0;padding:0 6px">×</button><br>${r.sentence}
+    </div>`).join('') : '';
+  $('savedRules').querySelectorAll('.saved').forEach((el) => (el.onclick = (ev) => { if (ev.target.dataset.del === undefined) applySavedRule(savedRows[+el.dataset.i]); }));
+  $('savedRules').querySelectorAll('button.del').forEach((b) => (b.onclick = async (ev) => {
+    ev.stopPropagation();
+    const r = savedRows[+b.dataset.del];
+    if (!r || !r.id) return;
+    b.textContent = '삭제?'; b.onclick = async (e2) => {
+      e2.stopPropagation();
+      const db = window.claude && (await window.claude.use('db'));
+      try { await db.collection('rules').doc(r.id).delete(); log('저장된 규칙을 지웠어요.', 'ok'); loadSavedRules(); } catch (e) { log('삭제 실패: ' + (e.message || e.code), 'err'); }
+    };
+  }));
+}
+// 저장된 규칙 다시 적용: 문장·해석·파라미터 복원 → 대안 생성 → 저장 때 고른 대안과 가장 가까운 것 선택 → 규모검토
+async function applySavedRule(r) {
+  if (!S.origin) { log('먼저 프로젝트 파일을 불러오세요.', 'err'); return; }
+  if (!r.type || !RULE_TYPES[r.type]) { log('이 규칙은 아직 계산할 수 없는 유형이에요.', 'warn'); return; }
+  const here = (S.project && S.project.address) || '';
+  if (r.project && here && r.project !== here) log('다른 대지에서 저장한 규칙이에요. 길 이름이 다르면 다시 골라야 해요.', 'warn');
+  $('ruleText').value = r.sentence || '';
+  const params = { ...(r.params || {}) };
+  const names = (S.roads || []).map((x) => x.name);
+  const missing = ['from', 'to'].filter((k) => params[k] && !names.includes(params[k]));
+  missing.forEach((k) => delete params[k]);
+  S.rule = { text: r.sentence || '', type: r.type, params, understood: r.understood || '', alts: [], sel: -1, path: null,
+    questions: missing.map((k) => ({ param: k, question: `${RULE_TYPES[r.type].params[k].label}을(를) 다시 골라 주세요 (저장할 때의 길 "${r.params[k]}"이 이 대지에 없어요).`, options: (S.roads || []).map((x) => ({ value: x.name, label: paramLabel(r.type, 'from', x.name) })) })) };
+  renderRule();
+  if (missing.length) return;
+  genAlts();
+  if (!S.rule.alts.length) return;
+  let pick = 0;
+  if (r.chosen) {
+    const [fx, fy] = r.chosen.from_xy, [tx, ty] = r.chosen.to_xy;
+    let bd = Infinity;
+    S.rule.alts.forEach((c, i) => { const d = Math.hypot(c.a.x - fx, c.a.y - fy) + Math.hypot(c.b.x - tx, c.b.y - ty); if (d < bd) { bd = d; pick = i; } });
+  }
+  await selectAlt(pick);
+  log('저장된 규칙을 불러와 다시 계산했어요.', 'ok');
 }
 
 // ---------- 내보내기 ----------
@@ -1794,6 +1843,7 @@ function loadProject(text) {
   $('floorH').value = S.floorH;
   S.project = { address: d.address || '', created: d.created || '' };
   S.rule = { text: '', type: null, params: {}, questions: [], alts: [], sel: -1, path: null }; $('ruleBox').innerHTML = ''; $('altBox').innerHTML = '';
+  if (STUDIO) renderSavedRules();
   log(`프로젝트 불러옴: ${d.address || ''}${T.ready ? '' : ' (지형 없음)'}`, 'ok');
   buildScene(true);
   if (window.__onProjectLoaded) window.__onProjectLoaded(d, text);
@@ -1843,7 +1893,7 @@ function init() {
   host.addEventListener('dragleave', () => host.classList.remove('drag'));
   host.addEventListener('drop', (e) => { e.preventDefault(); host.classList.remove('drag'); const f = e.dataTransfer.files[0]; if (f) f.text().then(loadProject).catch((er) => log('불러오기 실패: ' + er.message, 'err')); });
   window.__S = S; // 디버그용
-  window.__rules = { genAlts, selectAlt, renderRule, fullParams, exportProject };
+  window.__rules = { genAlts, selectAlt, renderRule, fullParams, exportProject, applySavedRule };
   window.__app = { loadProject, scaleStudy, buildScene, saveFile, dxf, elev, analyzeRoads, siteExteriorEdges, ZONES, log, THREE, groupCtx: () => groupCtx, textSprite, pip, polyArea, centroid, densify, offs: null };
   window.__demo = loadDemo;
   window.__mode = setMode;
