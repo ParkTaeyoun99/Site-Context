@@ -861,7 +861,9 @@ async function buildEnvelope() {
   const hIn = parseFloat($('zHmax').value); const hMax = hIn > 0 ? hIn : 30; // 미입력 시 표시 상한 30m
   const sbRoad = parseFloat($('zSbRoad').value) || 0, sbNb = parseFloat($('zSbNb').value) || 0;
   const sun = $('zSun').checked, sunRoad = $('zSunRoad').checked;
-  const sunD = Math.max(1.5, parseFloat($('zSunD').value) || 1.5); // 시행령: 1.5m 이상 범위에서 건축조례로 정함
+  const sunD = Math.max(1.5, parseFloat($('zSunD').value) || 1.5); // 1.5m 이상 범위에서 건축조례
+  const sunNew = $('zSunRule').value === 'new';
+  const sunD2 = Math.max(5, parseFloat($('zSunD2').value) || 5); // 10~17m 구간: 5m 이상 범위에서 건축조례
   const fh = S.floorH;
   const edges = siteExteriorEdges();
   const area = S.siteParcels.reduce((a, p) => a + Math.abs(polyArea(p.ring)), 0);
@@ -911,7 +913,8 @@ async function buildEnvelope() {
     let H = hMax;
     if (c.ref && resid(c.ref.parcel && c.ref.parcel.zoneName)) {
       const d = c.ref.y - c.p[1];
-      const Hs = d < sunD ? 0 : Math.max(10, 2 * d);
+      // 2026.11 시행: ≤10m 1.5m(조례) / 10~17m 5m(조례) / 17m 초과 H/2. 종전: 10m 초과 H/2
+      const Hs = d < sunD ? 0 : sunNew ? (d < sunD2 ? 10 : Math.max(17, 2 * d)) : Math.max(10, 2 * d);
       if (Hs < H) { H = Hs; sunLimited++; }
       refPts.push([c.p[0], c.ref.y]);
     }
@@ -937,7 +940,7 @@ async function buildEnvelope() {
     <b>볼륨이 담는 연면적</b> ${envGFA.toFixed(0)}㎡ · 최고 ${maxF}층<br>
     <b>→ ${govern}</b><br>
     건폐율을 꽉 채우면 평균 ${(farGFA / bcrA).toFixed(1)}개 층 · 정북일조로 낮아진 칸 ${((sunLimited / Math.max(1, evaluated)) * 100).toFixed(0)}%<br>
-    ${sun ? `정북 기준선: ${sunRoad ? '도로·철도 건너편 대지경계선 (시행령 86조⑥)' : '대지에 바로 맞닿은 인접대지만'}${refSummary.length ? '<br>기준 대지: ' + refSummary.slice(0, 6).join(', ') + (refSummary.length > 6 ? ` 외 ${refSummary.length - 6}` : '') : ''}<br>` : ''}
+    ${sun ? `정북 일조 기준: ${sunNew ? `2026.11 개정 (≤10m ${sunD}m · 10~17m ${sunD2}m · 17m 초과 H/2)` : `종전 (≤10m ${sunD}m · 10m 초과 H/2)`}<br>정북 기준선: ${sunRoad ? '도로·철도 건너편 대지경계선 (시행령 86조⑥)' : '대지에 바로 맞닿은 인접대지만'}${refSummary.length ? '<br>기준 대지: ' + refSummary.slice(0, 6).join(', ') + (refSummary.length > 6 ? ` 외 ${refSummary.length - 6}` : '') : ''}<br>` : ''}
     ${hIn > 0 ? '' : '<span class="warn">최고높이 미입력 → 볼륨은 30m까지만 표시 (실제 제한 아님)</span><br>'}<span class="dim">0.5m 격자 근사 · 층고 ${fh}m · 지표면은 경계 평균으로 단순화 (고저차 3m 초과 시 구간별 산정은 미반영)</span>`;
 }
 function drawEnvelope() {
