@@ -328,7 +328,10 @@ function initThree() {
   renderer.shadowMap.enabled = true;
   host.appendChild(renderer.domElement);
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xf4f2ee);
+  const darkMQ = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+  const applyBg = () => { scene.background = new THREE.Color(darkMQ && darkMQ.matches ? 0x1b1b1d : 0xf4f2ee); };
+  applyBg();
+  if (darkMQ && darkMQ.addEventListener) darkMQ.addEventListener('change', applyBg);
   camera = new THREE.PerspectiveCamera(40, 1, 1, 5000);
   camera.position.set(220, 260, 260);
   controls = new OrbitControls(camera, renderer.domElement);
@@ -556,7 +559,8 @@ function analyzeRoads() {
     const votes = {};
     if (r.kind === '도로') r.pts.forEach((q) => { const n = near(q.ox, q.oy); if (n) votes[n] = (votes[n] || 0) + q.len; });
     const top = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
-    r.name = top ? top[0] : `${r.dir}측 ${r.kind}`;
+    r.key = r.dir + '|' + r.kind;
+    r.name = (S.roadNames && S.roadNames[r.key]) || (top ? top[0] : `${r.dir}측 ${r.kind}`);
   });
   const seen = {};
   roads.forEach((r) => { if (seen[r.name]) r.name += ' (' + r.dir + '측)'; seen[r.name] = 1; });
@@ -594,9 +598,15 @@ function drawRoads() {
   const all = S.roads.map((r) => r.avg);
   const diff = Math.max(...all) - Math.min(...all);
   const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
-  box.innerHTML = S.roads.map((r) => `<b>${r.name}</b> ${r.name.includes(r.kind) ? '' : r.dir + '측 ' + r.kind + ' '}· 접도 ${r.len.toFixed(0)}m · 평균 ${fmt(r.avg)}m (${fmt(r.lo)} ~ ${fmt(r.hi)}) · 경사 ${r.slope.toFixed(1)}%`).join('<br>') +
+  box.innerHTML = S.roads.map((r, i) => `<input class="rname" data-ri="${i}" value="${r.name.replace(/"/g, '&quot;')}" title="이름 고치기"> ${r.name.includes(r.kind) ? '' : r.dir + '측 ' + r.kind + ' '}· 접도 ${r.len.toFixed(0)}m · 평균 ${fmt(r.avg)}m (${fmt(r.lo)} ~ ${fmt(r.hi)}) · 경사 ${r.slope.toFixed(1)}%`).join('<br>') +
     (S.roads.length > 1 ? `<br><b>접도 간 높이차 ${diff.toFixed(1)}m</b> (평균 기준) · 최대 ${(Math.max(...S.roads.map((r) => r.hi)) - Math.min(...S.roads.map((r) => r.lo))).toFixed(1)}m` : '') +
-    `<br><span class="dim">기준 0 = 대지 최저점 (해발 ${T.base.toFixed(1)}m). 경계 밖 4m 지점의 지형 높이.</span>`;
+    `<br><span class="dim">기준 0 = 대지 최저점 (해발 ${T.base.toFixed(1)}m). 경계 밖 4m 지점의 지형 높이. 이름 칸을 눌러 고칠 수 있어요.</span>`;
+  box.querySelectorAll('input.rname').forEach((inp) => (inp.onchange = () => {
+    const r = S.roads[+inp.dataset.ri], v = inp.value.trim();
+    S.roadNames = S.roadNames || {};
+    if (v) S.roadNames[r.key] = v; else delete S.roadNames[r.key];
+    buildScene(false);
+  }));
 }
 
 function updateStats() {
@@ -1555,7 +1565,7 @@ async function exportProject() {
     origin: S.origin, floorHeight: S.floorH, radius: S.radius, demo: S.demo,
     zone: S.zone || null, zoneInfo: $('zoneInfo').innerText,
     terrain: grid ? { base: T.base, grid } : null,
-    roadLines: S.roadLines || [],
+    roadLines: S.roadLines || [], roadNames: S.roadNames || {},
     site: S.siteParcels.map((p) => ({ id: p.id, jibun: p.jibun, ring: ringOut(p.ring), ground: r2(p.ground), pnu: p.props.pnu })),
     parcels: S.parcels.map((p) => ({ id: p.id, ring: ringOut(p.ring), ground: r2(p.ground), pnu: p.props.pnu, jibun: p.props.jibun, zoneName: p.zoneName })),
     buildings: S.buildings.map((b) => ({ id: b.id, ring: ringOut(b.ring), floors: b.floors, height: r2(b.height), heightSrc: b.heightSrc, ground: r2(b.ground), onSite: !!b.onSite,
@@ -1569,6 +1579,7 @@ function loadProject(text) {
   S.parcels = d.parcels.map((p) => { const q = { ...p, props: { pnu: p.pnu, jibun: p.jibun } }; if (p.zoneName === undefined) delete q.zoneName; return q; });
   S.buildings = d.buildings;
   S.roadLines = d.roadLines || [];
+  S.roadNames = d.roadNames || {};
   T.tiles = {}; T.grid = null; T.ready = false;
   if (d.terrain && d.terrain.grid) { T.grid = { ...d.terrain.grid, data: Float32Array.from(d.terrain.grid.data) }; T.base = d.terrain.base; T.ready = true; }
   S.zone = d.zone || null;
