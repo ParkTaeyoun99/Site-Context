@@ -469,7 +469,14 @@ function buildScene(resetCam) {
 }
 
 // ---------- 접도 분석: 대지 경계 바깥쪽 4m 지점이 도로인지, 그 높이는 얼마인지 ----------
-function isRoadParcel(p) { return /도$/.test(((p.props && p.props.jibun) || '').trim()); }
+function linearKind(p) { // 지목으로 도로·철도·구거 판별 (필지 없음 = 도로로 간주)
+  if (!p) return '도로';
+  const j = ((p.props && p.props.jibun) || '').trim();
+  if (/도$/.test(j)) return '도로';
+  if (/철$/.test(j)) return '철도부지';
+  if (/구$/.test(j)) return '구거';
+  return null;
+}
 function bearingName(nx, ny) {
   const a = (Math.atan2(nx, ny) * 180) / Math.PI; // 0 = 북, 시계방향
   const names = ['북', '북동', '동', '남동', '남', '남서', '서', '북서'];
@@ -479,7 +486,7 @@ function analyzeRoads() {
   if (!S.siteParcels.length) return [];
   const samples = [];
   S.siteParcels.forEach((sp) => {
-    const r = polyArea(sp.ring) < 0 ? sp.ring.slice().reverse() : sp.ring; // CCW
+    const r = polyArea(sp.ring) > 0 ? sp.ring.slice().reverse() : sp.ring; // CCW (polyArea는 CCW에서 음수)
     r.forEach((a, i) => {
       const b = r[(i + 1) % r.length];
       const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
@@ -491,8 +498,8 @@ function analyzeRoads() {
         const ox = x + nx * 4, oy = y + ny * 4;
         if (S.siteParcels.some((q) => pip([ox, oy], q.ring))) continue; // 대지 내부 경계
         const hit = S.parcels.find((q) => pip([ox, oy], q.ring));
-        const road = !hit || isRoadParcel(hit);
-        samples.push({ x, y, ox, oy, nx, ny, len: L / n, road, edgeG: elev(x, y), roadG: elev(ox, oy) });
+        const kind = linearKind(hit);
+        samples.push({ x, y, ox, oy, nx, ny, len: L / n, road: !!kind, kind, edgeG: elev(x, y), roadG: elev(ox, oy) });
       }
     });
   });
@@ -502,7 +509,7 @@ function analyzeRoads() {
   const find = (i) => (par[i] === i ? i : (par[i] = find(par[i])));
   for (let i = 0; i < rs.length; i++) for (let j = i + 1; j < rs.length; j++) {
     const A = rs[i], B = rs[j];
-    if (Math.hypot(A.x - B.x, A.y - B.y) < 6 && A.nx * B.nx + A.ny * B.ny > Math.cos((50 * Math.PI) / 180)) par[find(i)] = find(j);
+    if (A.kind === B.kind && Math.hypot(A.x - B.x, A.y - B.y) < 6 && A.nx * B.nx + A.ny * B.ny > Math.cos((50 * Math.PI) / 180)) par[find(i)] = find(j);
   }
   const groups = {};
   rs.forEach((q, i) => (groups[find(i)] = groups[find(i)] || []).push(q));
@@ -515,7 +522,7 @@ function analyzeRoads() {
     let far = [g[0], g[0]], best = -1;
     g.forEach((p) => g.forEach((q) => { const d = Math.hypot(p.x - q.x, p.y - q.y); if (d > best) { best = d; far = [p, q]; } }));
     const slope = best > 0 ? (Math.abs(far[0].roadG - far[1].roadG) / best) * 100 : 0;
-    return { dir: bearingName(nx, ny), len, lo, hi, avg, slope, pts: g };
+    return { dir: bearingName(nx, ny), kind: g[0].kind, len, lo, hi, avg, slope, pts: g };
   }).sort((a, b) => b.len - a.len);
   roads.forEach((r, i) => (r.name = String.fromCharCode(65 + i)));
   return roads;
@@ -550,7 +557,7 @@ function drawRoads() {
   const all = S.roads.map((r) => r.avg);
   const diff = Math.max(...all) - Math.min(...all);
   const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
-  box.innerHTML = S.roads.map((r) => `<b>${r.name}</b> ${r.dir}측 · 접도 ${r.len.toFixed(0)}m · 평균 ${fmt(r.avg)}m (${fmt(r.lo)} ~ ${fmt(r.hi)}) · 경사 ${r.slope.toFixed(1)}%`).join('<br>') +
+  box.innerHTML = S.roads.map((r) => `<b>${r.name}</b> ${r.dir}측 ${r.kind} · 접도 ${r.len.toFixed(0)}m · 평균 ${fmt(r.avg)}m (${fmt(r.lo)} ~ ${fmt(r.hi)}) · 경사 ${r.slope.toFixed(1)}%`).join('<br>') +
     (S.roads.length > 1 ? `<br><b>도로 간 높이차 ${diff.toFixed(1)}m</b> (평균 기준) · 최대 ${(Math.max(...S.roads.map((r) => r.hi)) - Math.min(...S.roads.map((r) => r.lo))).toFixed(1)}m` : '') +
     `<br><span class="dim">기준 0 = 대지 최저점 (해발 ${T.base.toFixed(1)}m). 경계 밖 4m 지점의 지형 높이.</span>`;
 }
