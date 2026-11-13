@@ -912,7 +912,7 @@ function drawEnvelope() {
   const arr = [];
   segs.forEach(([x0, y0, x1, y1, z]) => arr.push(x0, z, -y0, x1, z, -y1));
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
-  grp.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x1a3a8f })));
+  grp.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x1a3a8f, transparent: true, opacity: 0.3 })));
   S.envGroup = grp;
   groupCtx.add(grp);
 }
